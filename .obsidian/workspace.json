@@ -1,0 +1,222 @@
+{
+  "main": {
+    "id": "3b9d9ad32bdd5718",
+    "type": "split",
+    "children": [
+      {
+        "id": "361229dc27d223ee",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "7538528f8ad3cce3",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "Infrastructure/Deployments.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "Deployments"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "b7c791ee964905cb",
+    "type": "split",
+    "children": [
+      {
+        "id": "50eedeaac68d45b1",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "6bd8eea517047acd",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "8f1dfa2d89136d77",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "fa08123d924a4a8d",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "2df621329084c097",
+    "type": "split",
+    "children": [
+      {
+        "id": "c60f521f70243c6a",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "31b637d5d4f28e5f",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks"
+            }
+          },
+          {
+            "id": "b230d197dc1e4953",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links"
+            }
+          },
+          {
+            "id": "5e188bcf5e413e17",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "bf41016796c4d1b3",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "3f2a8bbd8d0ac17f",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false,
+      "claude-code-mcp:Toggle Claude Terminal": false
+    }
+  },
+  "active": "7538528f8ad3cce3",
+  "lastOpenFiles": [
+    "Infrastructure/Deployments.md",
+    "Infrastructure/kubectl.md",
+    "Home.md",
+    "Homelab.md",
+    "Untitled.canvas",
+    "Untitled.base",
+    "France/Признание диплома во Франции.md",
+    "France/TCF IRN.md",
+    "France/Passeport Talent.md",
+    "France/France.md",
+    "France/ENIC-NARIC.md",
+    "Infrastructure/OpenWrt.md",
+    "France",
+    "Infrastructure/MX64 - Установка OpenWrt.md",
+    "Infrastructure/MX64 - U-Boot команды.md",
+    "Infrastructure/K3s - Установка HA.md",
+    "Infrastructure/K3s - Архитектура.md",
+    "Infrastructure/K3s.md",
+    "Hardware/Dell OptiPlex 3050.md",
+    "Hardware/polynode-1.md",
+    "2026-01-15.md",
+    "Hardware/Cisco Meraki MX64.md",
+    "Hardware/polynode-3.md",
+    "Hardware/polynode-2.md",
+    "Templates/Tech Topic.md",
+    "Infrastructure/Kubernetes.md",
+    "Infrastructure/K3s - Troubleshooting.md",
+    "Infrastructure/K3s - kube-vip.md",
+    "Hardware",
+    "K3s - Ноды.md",
+    "Attachments",
+    "Templates",
+    "Daily",
+    "Infrastructure",
+    "Inbox"
+  ]
+}
