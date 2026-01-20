@@ -22,5 +22,7 @@ created: 2025-01-15
 ## См. также
 
 - [[K3s]]
+- [[Longhorn]]
 - [[polynode-1]]
 - [[polynode-2]]
+- [[polydev-desktop]]

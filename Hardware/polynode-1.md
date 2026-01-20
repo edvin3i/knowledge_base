@@ -23,10 +23,12 @@ created: 2025-01-15
 
 - Инициализация кластера (`--cluster-init`)
 - Один из 3 серверов etcd (кворум)
-- Участвует в выборах [[kube-vip]] лидера
+- Участвует в выборах [[K3s - kube-vip|kube-vip]] лидера
 
 ## См. также
 
 - [[K3s]]
+- [[Longhorn]]
 - [[polynode-2]]
 - [[polynode-3]]
+- [[polydev-desktop]]
