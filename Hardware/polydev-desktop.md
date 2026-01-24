@@ -298,10 +298,26 @@ sudo ufw disable
 
 **Важно:** Без этих правил Longhorn и другие компоненты не смогут общаться между подами. См. [[K3s - Troubleshooting#UFW блокирует pod-to-pod трафик]].
 
+## GPU Sharing
+
+RTX A6000 **не поддерживает MIG** (Multi-Instance GPU), но поддерживает:
+
+- **Time-Slicing** — переключение контекста между подами
+- **MPS** — параллельное выполнение CUDA процессов
+
+Рекомендуется **Time-Slicing** с `replicas: 4` для разделения 48 GB VRAM между:
+- YOLO (Nuclio) ~4-6 GB
+- RIFE ~6-8 GB
+- Real-ESRGAN ~4-6 GB
+- Резерв
+
+Подробнее: [[K3s - GPU Sharing]]
+
 ## См. также
 
 - [[K3s]]
 - [[K3s - GPU Support]]
+- [[K3s - GPU Sharing]]
 - [[K3s - Troubleshooting]]
 - [[CVAT]]
 - [[Longhorn]]

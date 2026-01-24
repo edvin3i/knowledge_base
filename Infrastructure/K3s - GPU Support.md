@@ -536,9 +536,22 @@ spec:
 | nvidia-container-toolkit | 1.15.0 | `dpkg -l \| grep nvidia-container` |
 | nvidia-device-plugin | v0.17.0 | `kubectl get ds -n kube-system` |
 
+---
+
+## Следующие шаги
+
+После базовой настройки GPU можно:
+
+- [[K3s - GPU Sharing]] — разделить GPU между несколькими подами (Time-Slicing)
+- Настроить мониторинг GPU через DCGM Exporter
+- Интегрировать с [[ClearML]] для ML workloads
+
+---
+
 ## См. также
 
 - [[K3s]]
+- [[K3s - GPU Sharing]] — Time-Slicing, MPS, MIG
 - [[K3s - Troubleshooting]]
 - [[polydev-desktop]]
 - [[K3s - Установка HA]]
