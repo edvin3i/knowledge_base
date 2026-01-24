@@ -6,7 +6,6 @@ tags:
   - s3
 created: 2026-01-20
 ---
-
 # MinIO
 
 S3-совместимое объектное хранилище в [[K3s]] кластере.
@@ -154,29 +153,92 @@ kubectl get svc -n minio
 
 ## Использование
 
-### MinIO Client (mc)
+### MinIO Client (mcli)
+
+> **Примечание:** Стандартная команда `mc` конфликтует с Midnight Commander. Поэтому устанавливаем как `mcli`.
 
 ```bash
-# Установить mc
+# Установить как mcli (чтобы не конфликтовать с Midnight Commander)
 curl -O https://dl.min.io/client/mc/release/linux-amd64/mc
-chmod +x mc
-sudo mv mc /usr/local/bin/
+sudo chmod +x mc
+sudo mv mc /usr/local/bin/mcli
 
 # Настроить alias
-mc alias set homelab http://192.168.20.237 fsadm minimiAdmin
+mcli alias set homelab http://192.168.20.237 fsadm minimiAdmin
 
-# Операции
-mc ls homelab                    # Список buckets
-mc mb homelab/new-bucket         # Создать bucket
-mc cp file.txt homelab/bucket/   # Загрузить файл
-mc ls homelab/bucket/            # Содержимое bucket
+# Основные операции
+mcli ls homelab                           # Список buckets
+mcli ls homelab/datasets/                 # Содержимое bucket
+mcli mb homelab/new-bucket                # Создать bucket
+mcli cp file.txt homelab/bucket/          # Загрузить файл
+mcli cp -r /local/dir homelab/bucket/     # Загрузить директорию
+mcli rm homelab/bucket/file.txt           # Удалить файл
+mcli rm -r --force homelab/bucket/dir/    # Удалить директорию
+
+# Синхронизация
+mcli mirror /local/path homelab/bucket/   # Односторонняя синхронизация
+mcli mirror --watch /local homelab/bucket # Непрерывная синхронизация
+
+# Информация
+mcli admin info homelab                   # Статус сервера
+mcli du homelab/bucket/                   # Размер данных
+```
+
+---
+
+### AWS CLI
+
+Универсальный способ, работает с любым S3-совместимым хранилищем.
+
+```bash
+# Установить
+pip install awscli
+# или
+sudo apt install awscli
+
+# Настроить профиль для MinIO
+aws configure --profile minio
+# AWS Access Key ID: fsadm
+# AWS Secret Access Key: minimiAdmin
+# Default region: us-east-1
+# Default output format: json
+
+# Добавить alias в ~/.bashrc для удобства
+cat >> ~/.bashrc << 'EOF'
+
+# MinIO shortcuts
+export MINIO_ENDPOINT="http://192.168.20.237"
+alias minio="aws --profile minio --endpoint-url \$MINIO_ENDPOINT s3"
+alias minio-api="aws --profile minio --endpoint-url \$MINIO_ENDPOINT s3api"
+EOF
+source ~/.bashrc
+
+# Основные операции
+minio ls                                  # Список buckets
+minio ls s3://datasets/                   # Содержимое bucket
+minio mb s3://new-bucket                  # Создать bucket
+minio cp file.txt s3://bucket/            # Загрузить файл
+minio cp --recursive /dir s3://bucket/    # Загрузить директорию
+minio sync /local/path s3://bucket/path/  # Синхронизация
+minio rm s3://bucket/file.txt             # Удалить файл
+
+# Без alias (полная команда)
+aws --profile minio --endpoint-url http://192.168.20.237 s3 ls
 ```
 
 ### Python (boto3)
 
+Для скриптов и автоматизации.
+
+```bash
+pip install boto3
+```
+
 ```python
 import boto3
+from pathlib import Path
 
+# Создать клиент
 s3 = boto3.client(
     's3',
     endpoint_url='http://192.168.20.237',
@@ -190,10 +252,90 @@ for b in buckets['Buckets']:
     print(b['Name'])
 
 # Загрузить файл
-s3.upload_file('local.txt', 'cvat', 'remote.txt')
+s3.upload_file('local.txt', 'datasets', 'path/remote.txt')
 
 # Скачать файл
-s3.download_file('cvat', 'remote.txt', 'downloaded.txt')
+s3.download_file('datasets', 'path/remote.txt', 'downloaded.txt')
+
+# Список объектов в bucket
+response = s3.list_objects_v2(Bucket='datasets', Prefix='polyvision/')
+for obj in response.get('Contents', []):
+    print(obj['Key'], obj['Size'])
+
+# Удалить объект
+s3.delete_object(Bucket='datasets', Key='path/file.txt')
+```
+
+#### Загрузка директории рекурсивно
+
+```python
+from pathlib import Path
+import boto3
+
+def upload_directory(local_dir: str, bucket: str, prefix: str = ""):
+    """Загрузить директорию в MinIO рекурсивно."""
+    s3 = boto3.client(
+        's3',
+        endpoint_url='http://192.168.20.237',
+        aws_access_key_id='fsadm',
+        aws_secret_access_key='minimiAdmin'
+    )
+
+    local_path = Path(local_dir)
+    uploaded = 0
+
+    for file in local_path.rglob('*'):
+        if file.is_file():
+            key = f"{prefix}/{file.relative_to(local_path)}" if prefix else str(file.relative_to(local_path))
+            s3.upload_file(str(file), bucket, key)
+            uploaded += 1
+            print(f"✓ {key}")
+
+    print(f"\nUploaded {uploaded} files to s3://{bucket}/{prefix}")
+
+# Пример: загрузить датасет
+upload_directory(
+    "/home/edvin/Expirements/Datasets/mixed_dataset_26500/Polyvision_dataset_five_classes_v1.1",
+    "datasets",
+    "polyvision_v1.1"
+)
+```
+
+#### Скачивание директории
+
+```python
+import os
+from pathlib import Path
+import boto3
+
+def download_directory(bucket: str, prefix: str, local_dir: str):
+    """Скачать директорию из MinIO."""
+    s3 = boto3.client(
+        's3',
+        endpoint_url='http://192.168.20.237',
+        aws_access_key_id='fsadm',
+        aws_secret_access_key='minimiAdmin'
+    )
+
+    local_path = Path(local_dir)
+    paginator = s3.get_paginator('list_objects_v2')
+    downloaded = 0
+
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get('Contents', []):
+            key = obj['Key']
+            rel_path = key[len(prefix):].lstrip('/')
+            target = local_path / rel_path
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            s3.download_file(bucket, key, str(target))
+            downloaded += 1
+            print(f"✓ {rel_path}")
+
+    print(f"\nDownloaded {downloaded} files to {local_dir}")
+
+# Пример: скачать датасет
+download_directory("datasets", "polyvision_v1.1/", "/tmp/polyvision")
 ```
 
 ### Kubernetes Secret для приложений
@@ -319,6 +461,9 @@ mc mirror homelab/cvat remote/cvat --watch
 ## См. также
 
 - [[K3s]]
+- [[K3s - Архитектура]] — схема взаимодействия сервисов
+- [[Kubernetes - Сеть и взаимодействие]] — теория networking
+- [[Services]] — типы сервисов, порты
 - [[Longhorn]]
 - [[CVAT]]
 - [[ClearML]]

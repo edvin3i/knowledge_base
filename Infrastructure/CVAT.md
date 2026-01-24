@@ -5,7 +5,7 @@ tags:
   - annotation
   - infrastructure
 created: 2026-01-19
-updated: 2026-01-20
+updated: 2026-01-22
 ---
 
 # CVAT
@@ -532,6 +532,417 @@ grafana:
 helm upgrade cvat ./helm-chart -n cvat -f cvat-values.yaml
 ```
 
+### Cloud Storage: "Resource not found" при подключении MinIO
+
+**Симптом:** При создании Cloud Storage в CVAT UI ошибка:
+```
+Could not create the cloud storage
+resource: The resource <bucket> not found. It may have been deleted.
+```
+
+**Причина:** CVAT использует **Smokescreen** — HTTP proxy для защиты от [SSRF атак](https://owasp.org/API-Security/editions/2023/en/0xa7-server-side-request-forgery/). По умолчанию Smokescreen блокирует все приватные IP диапазоны.
+
+#### Теория: Что такое SSRF и Smokescreen
+
+**SSRF (Server-Side Request Forgery)** — атака, при которой злоумышленник заставляет сервер делать запросы к внутренним ресурсам:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         SSRF Attack                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Attacker                                                       │
+│      │                                                           │
+│      │ 1. "Add cloud storage: http://169.254.169.254"           │
+│      ▼                                                           │
+│   ┌─────────┐                                                    │
+│   │  CVAT   │  2. CVAT делает запрос к указанному URL           │
+│   │ Backend │─────────────────────┐                              │
+│   └─────────┘                     │                              │
+│                                   ▼                              │
+│                            ┌─────────────┐                       │
+│                            │ Cloud Meta  │  ← AWS/GCP metadata   │
+│                            │ 169.254.x.x │     API с credentials │
+│                            └─────────────┘                       │
+│                                                                  │
+│   Или: http://10.43.x.x ─► Internal K8s services                │
+│   Или: http://localhost ─► Localhost services                   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Smokescreen** ([Stripe](https://github.com/stripe/smokescreen)) — HTTP CONNECT proxy, который:
+- Резолвит DNS перед подключением
+- Блокирует приватные IP диапазоны (10.x, 172.16.x, 192.168.x, localhost, link-local)
+- Логирует все исходящие соединения
+- Предотвращает SSRF атаки
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Smokescreen Protection                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Request: http://minio.minio.svc.cluster.local                 │
+│      │                                                           │
+│      │ 1. DNS resolve                                            │
+│      ▼                                                           │
+│   ┌───────────────┐                                              │
+│   │  Smokescreen  │  2. Resolved IP: 10.43.39.217               │
+│   │               │  3. Check: Is 10.43.x.x private? YES        │
+│   │               │  4. Action: DENY ❌                          │
+│   └───────────────┘                                              │
+│                                                                  │
+│   Log: "destination address was denied by rule                  │
+│         'Deny: Private Range'"                                   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Диагностика
+
+```bash
+# Проверить логи backend при попытке создания cloud storage
+kubectl logs -n cvat deploy/cvat-backend-server --tail=50 | grep -i smokescreen
+
+# Ожидаемый вывод при блокировке:
+# "decision_reason": "The destination address (10.43.39.217) was denied
+#  by rule 'Deny: Private Range'"
+```
+
+#### Решение: Разрешить внутренний CIDR кластера
+
+Для подключения к MinIO внутри кластера нужно добавить Kubernetes Service CIDR в allow-list.
+
+**Найти Service CIDR:**
+```bash
+kubectl cluster-info dump | grep -m1 service-cluster-ip-range
+# Обычно: 10.43.0.0/16 для K3s
+```
+
+**Обновить SMOKESCREEN_OPTS:**
+```bash
+# Backend server
+kubectl set env deploy/cvat-backend-server -n cvat \
+  SMOKESCREEN_OPTS="--allow-range=10.43.0.0/16"
+
+# Workers (для import/export с cloud storage)
+kubectl set env deploy/cvat-backend-worker-import -n cvat \
+  SMOKESCREEN_OPTS="--allow-range=10.43.0.0/16"
+kubectl set env deploy/cvat-backend-worker-export -n cvat \
+  SMOKESCREEN_OPTS="--allow-range=10.43.0.0/16"
+
+# Дождаться перезапуска
+kubectl rollout status deploy/cvat-backend-server -n cvat
+```
+
+**Через Helm (постоянное решение):**
+```yaml
+# cvat-values.yaml
+smokescreen:
+  opts: "--allow-range=10.43.0.0/16"
+```
+
+#### Безопасность: Оценка рисков
+
+| Аспект | Оценка | Комментарий |
+|--------|--------|-------------|
+| **Риск SSRF** | Низкий | Разрешён только Service CIDR (10.43.x.x), не pod CIDR |
+| **Доступные сервисы** | MinIO, внутренние ClusterIP | Не metadata API (169.254.x.x) |
+| **Mitigation** | Сетевые политики | NetworkPolicy может ограничить egress |
+| **Альтернатива** | `--allow-address` | Точечное разрешение одного IP |
+
+**Более строгий вариант — разрешить только MinIO:**
+```bash
+# Узнать ClusterIP MinIO
+MINIO_IP=$(kubectl get svc minio -n minio -o jsonpath='{.spec.clusterIP}')
+
+kubectl set env deploy/cvat-backend-server -n cvat \
+  SMOKESCREEN_OPTS="--allow-address=$MINIO_IP"
+```
+
+**Рекомендация для production:**
+1. Использовать `--allow-address` вместо `--allow-range` где возможно
+2. Добавить NetworkPolicy для ограничения egress CVAT
+3. Мониторить логи Smokescreen на подозрительные запросы
+
+#### Настройка Cloud Storage после исправления
+
+После применения fix, в CVAT UI:
+
+| Поле | Значение |
+|------|----------|
+| Display name | `MinIO Datasets` |
+| Provider | AWS S3 |
+| Bucket name | `datasets` |
+| Access key ID | `fsadm` |
+| Secret access key | `minimiAdmin` |
+| **Endpoint URL** | `http://minio.minio.svc.cluster.local` |
+| Region | `us-east-1` |
+
+**Важно:** Использовать внутренний DNS (`minio.minio.svc.cluster.local`), а не внешний IP.
+
+#### Ссылки
+
+- [Stripe Smokescreen](https://github.com/stripe/smokescreen)
+- [OWASP SSRF Prevention](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)
+- [CVAT Issue #6457](https://github.com/cvat-ai/cvat/issues/6457) — Smokescreen errors
+- [Material Security: Locking Down Internet Traffic in K8s](https://material.security/blog/locking-down-internet-traffic-in-kubernetes)
+
+---
+
+## Cloud Storage и MinIO интеграция
+
+CVAT поддерживает Cloud Storage для хранения данных, экспорта аннотаций и бэкапов проектов.
+
+### Теория: Source и Target Storage
+
+CVAT различает два типа хранилищ:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  CVAT Storage Architecture                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   ┌─────────────────┐         ┌─────────────────┐              │
+│   │ Source Storage  │         │ Target Storage  │              │
+│   │  (откуда брать) │         │ (куда сохранять)│              │
+│   └────────┬────────┘         └────────┬────────┘              │
+│            │                           │                        │
+│            ▼                           ▼                        │
+│   ┌─────────────────┐         ┌─────────────────┐              │
+│   │ MinIO Datasets  │         │ MinIO CVAT      │              │
+│   │ s3://datasets/  │         │ s3://cvat/      │              │
+│   │                 │         │                 │              │
+│   │ - Изображения   │         │ - Экспорты      │              │
+│   │ - Видео         │         │ - Бэкапы        │              │
+│   │ - Датасеты      │         │ - Аннотации     │              │
+│   └─────────────────┘         └─────────────────┘              │
+│                                                                  │
+│   Workflow:                                                      │
+│   1. Task создаётся из Source Storage (images)                  │
+│   2. Аннотирование в CVAT UI                                    │
+│   3. Export/Backup в Target Storage                             │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+| Storage Type | Назначение | Пример |
+|--------------|------------|--------|
+| **Source** | Исходные данные для разметки | `s3://datasets/polyvision/images/` |
+| **Target** | Результаты (экспорты, бэкапы) | `s3://cvat/exports/`, `s3://cvat/backups/` |
+
+### Настроенные Cloud Storages
+
+| Display Name | Bucket | Endpoint | Назначение |
+|--------------|--------|----------|------------|
+| `MinIO Datasets` | `datasets` | `http://minio.minio.svc.cluster.local` | Source — датасеты для разметки |
+| `MinIO CVAT Internal` | `cvat` | `http://minio.minio.svc.cluster.local` | Target — экспорты и бэкапы |
+
+### Использование Source Storage
+
+При создании Task можно загружать данные напрямую из Cloud Storage:
+
+1. **Tasks** → **Create Task**
+2. **Select files** → **Cloud Storage**
+3. Выбрать `MinIO Datasets`
+4. Указать путь: `polyvision-cls-5-v1.1/Polyvision_dataset_five_classes_v1.1/images/Train/`
+5. Выбрать файлы или использовать pattern `*`
+
+**Manifest (опционально):** Для ускорения загрузки больших датасетов создайте `manifest.jsonl`:
+
+```bash
+# На локальной машине
+cd /path/to/dataset
+python3 -c "
+import json
+from pathlib import Path
+
+for img in sorted(Path('images/Train').glob('*.jpg')):
+    print(json.dumps({'name': str(img)}))
+" > manifest.jsonl
+
+# Загрузить в MinIO
+mcli cp manifest.jsonl homelab/datasets/polyvision-cls-5-v1.1/
+```
+
+### Использование Target Storage
+
+#### Экспорт аннотаций в Cloud Storage
+
+1. **Task/Project** → **Actions** → **Export dataset**
+2. Выбрать формат: `YOLO 1.1`, `COCO 1.0`, `CVAT for images 1.1`, etc.
+3. **☐ Use default settings** — отключить
+4. **Target storage**: `Cloud storage` → `MinIO CVAT Internal`
+5. Указать путь (prefix): `exports/polyvision/`
+6. **Export**
+
+Результат:
+```
+s3://cvat/exports/polyvision/annotations_yolo_2026-01-22.zip
+```
+
+#### Backup проекта в Cloud Storage
+
+1. **Project** → **Actions** → **Backup**
+2. **Custom name**: `polyvision_v1` (опционально)
+3. **☑️ Use lightweight backup** — рекомендуется для cloud-sourced данных
+4. **☐ Use default settings** — отключить
+5. **Target storage**: `Cloud storage` → `MinIO CVAT Internal`
+6. **Backup**
+
+**Lightweight backup:**
+- Сохраняет только метаданные + аннотации
+- НЕ копирует медиафайлы (они уже в Source Storage)
+- Значительно быстрее и меньше по размеру
+
+Результат:
+```
+s3://cvat/backups/polyvision_v1_backup_2026_01_22_12_30.zip
+```
+
+### Структура данных в MinIO
+
+```
+MinIO (192.168.20.237)
+│
+├── datasets/                              ← Source Storage
+│   └── polyvision-cls-5-v1.1/
+│       └── Polyvision_dataset_five_classes_v1.1/
+│           ├── data.yaml
+│           ├── Train.txt
+│           ├── Validation.txt
+│           ├── manifest.jsonl             ← опционально
+│           ├── images/
+│           │   ├── Train/
+│           │   └── Validation/
+│           └── labels/
+│               ├── Train/
+│               └── Validation/
+│
+├── cvat/                                  ← Target Storage
+│   ├── exports/
+│   │   └── polyvision/
+│   │       ├── polyvision_yolo_2026-01-22.zip
+│   │       ├── polyvision_coco_2026-01-22.zip
+│   │       └── polyvision_cvat_2026-01-22.zip
+│   └── backups/
+│       ├── polyvision_v1_backup_2026-01-22.zip
+│       └── polyvision_v2_backup_2026-01-23.zip
+│
+├── clearml/                               ← ClearML артефакты
+│   └── ...
+│
+└── models/                                ← Обученные модели
+    └── ...
+```
+
+### Автоматизация бэкапов (опционально)
+
+CVAT не имеет встроенного автобэкапа. Можно настроить через Kubernetes CronJob:
+
+```yaml
+# cvat-backup-cronjob.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cvat-auto-backup
+  namespace: cvat
+spec:
+  schedule: "0 3 * * *"  # Ежедневно в 03:00
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: backup
+            image: python:3.11-slim
+            env:
+            - name: CVAT_HOST
+              value: "http://cvat-backend-service:8080"
+            - name: CVAT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cvat-api-credentials
+                  key: token
+            command:
+            - python3
+            - -c
+            - |
+              import requests
+              import os
+              from datetime import datetime
+
+              host = os.environ['CVAT_HOST']
+              token = os.environ['CVAT_TOKEN']
+              headers = {'Authorization': f'Token {token}'}
+
+              # Получить список проектов
+              projects = requests.get(f'{host}/api/projects', headers=headers).json()
+
+              for project in projects.get('results', []):
+                  pid = project['id']
+                  name = project['name'].replace(' ', '_')
+                  date = datetime.now().strftime('%Y%m%d')
+
+                  # Запустить backup
+                  requests.post(
+                      f'{host}/api/projects/{pid}/backup',
+                      headers=headers,
+                      json={
+                          'filename': f'{name}_auto_{date}',
+                          'target_storage': {'location': 'cloud_storage', 'cloud_storage_id': 2}
+                      }
+                  )
+                  print(f'Backup started for project: {name}')
+          restartPolicy: OnFailure
+```
+
+**Создать secret с API токеном:**
+```bash
+# Получить токен в CVAT UI: User → Settings → Account → Access token
+kubectl create secret generic cvat-api-credentials \
+  --from-literal=token=YOUR_API_TOKEN \
+  -n cvat
+```
+
+### Интеграция с ClearML
+
+Датасеты в MinIO доступны как для CVAT, так и для ClearML:
+
+```python
+from clearml import Dataset
+
+# Зарегистрировать датасет из MinIO
+dataset = Dataset.create(
+    dataset_name="polyvision_football",
+    dataset_project="Polyvision",
+    dataset_version="1.1"
+)
+
+# Добавить файлы из того же MinIO bucket
+dataset.add_external_files(
+    source_url="s3://192.168.20.237:80/datasets/polyvision-cls-5-v1.1/",
+    wildcard="**/*"
+)
+
+dataset.finalize(auto_upload=True)
+```
+
+Workflow CVAT ↔ ClearML:
+1. **CVAT**: Аннотирование в `s3://datasets/`
+2. **CVAT**: Export в `s3://cvat/exports/`
+3. **ClearML**: Регистрация датасета из `s3://datasets/`
+4. **ClearML**: Обучение модели → результат в `s3://models/`
+5. **CVAT/Nuclio**: Использование модели для авто-аннотации
+
+### Ссылки
+
+- [CVAT Backup Documentation](https://docs.cvat.ai/docs/dataset_management/backup/)
+- [CVAT Attach Cloud Storage](https://docs.cvat.ai/docs/manual/basics/attach-cloud-storage/)
+- [Source & Target Storage PR #4842](https://github.com/cvat-ai/cvat/pull/4842)
+
 ---
 
 ## Nuclio — Serverless AI Functions
@@ -950,6 +1361,234 @@ kubectl get runtimeclass nvidia
 kubectl describe pod -n cvat -l nuclio.io/function-name=<func-name> | grep nvidia
 ```
 
+#### Модели не отображаются в CVAT UI после изменений
+
+**Симптом:** После обновления CVAT или изменения конфигурации (Smokescreen, Ingress и т.д.) модели Nuclio перестают отображаться в CVAT UI (AI Tools → пустой список).
+
+**Причина:** CVAT backend не может подключиться к Nuclio Dashboard. Типичные причины:
+
+1. **Неправильный порт:** CVAT по умолчанию ожидает Nuclio на порту 8070, но Helm chart CVAT создаёт сервис на порту 80
+2. **Неправильный hostname:** `CVAT_NUCLIO_HOST` указывает на несуществующий сервис
+3. **Network policy:** Сетевые политики блокируют трафик между CVAT и Nuclio
+
+**Диагностика:**
+
+```bash
+# 1. Проверить что Nuclio Dashboard работает
+kubectl get pods -n cvat | grep nuclio
+# nuclio-controller и nuclio-dashboard должны быть Running
+
+# 2. Проверить сервис Nuclio
+kubectl get svc -n cvat | grep nuclio
+# cvat-nuclio-dashboard должен показывать порт (обычно 80)
+
+# 3. Проверить текущее значение CVAT_NUCLIO_HOST
+kubectl exec -n cvat deploy/cvat-backend-server -- env | grep NUCLIO
+
+# 4. Проверить доступность Nuclio API из CVAT backend
+kubectl exec -n cvat deploy/cvat-backend-server -- \
+  curl -s http://cvat-nuclio-dashboard:80/api/functions | head -c 200
+
+# Если возвращает JSON с функциями — проблема в CVAT_NUCLIO_HOST
+# Если ошибка подключения — проверить сервис и поды
+```
+
+**Решение:**
+
+```bash
+# Узнать правильный порт сервиса Nuclio Dashboard
+kubectl get svc cvat-nuclio-dashboard -n cvat -o jsonpath='{.spec.ports[0].port}'
+# Обычно: 80 (не 8070!)
+
+# ВАЖНО: CVAT использует ОТДЕЛЬНЫЕ переменные для host и port
+# НЕ указывать порт в CVAT_NUCLIO_HOST — иначе получится двойной порт!
+
+# Обновить ВСЕ компоненты которые обращаются к Nuclio:
+# - backend-server: для отображения списка моделей в UI
+# - worker-annotation: для выполнения автоматической аннотации
+kubectl set env deploy/cvat-backend-server -n cvat \
+  CVAT_NUCLIO_HOST="cvat-nuclio-dashboard" \
+  CVAT_NUCLIO_PORT="80"
+
+kubectl set env deploy/cvat-backend-worker-annotation -n cvat \
+  CVAT_NUCLIO_HOST="cvat-nuclio-dashboard" \
+  CVAT_NUCLIO_PORT="80"
+
+# Дождаться перезапуска
+kubectl rollout status deploy/cvat-backend-server -n cvat
+kubectl rollout status deploy/cvat-backend-worker-annotation -n cvat
+
+# Проверить что модели теперь доступны
+kubectl exec -n cvat deploy/cvat-backend-server -- \
+  curl -s http://cvat-nuclio-dashboard:80/api/functions | python3 -c "import sys,json; print('\n'.join(json.load(sys.stdin).keys()))"
+```
+
+**Через Helm (постоянное решение):**
+
+```yaml
+# cvat-values.yaml
+cvat:
+  backend:
+    server:
+      envs:
+        CVAT_NUCLIO_HOST: "cvat-nuclio-dashboard"
+        CVAT_NUCLIO_PORT: "80"
+    worker:
+      annotation:
+        envs:
+          CVAT_NUCLIO_HOST: "cvat-nuclio-dashboard"
+          CVAT_NUCLIO_PORT: "80"
+```
+
+**Разбор проблемы:**
+
+CVAT формирует URL к Nuclio как `http://{CVAT_NUCLIO_HOST}:{CVAT_NUCLIO_PORT}/api/functions`.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Nuclio Connectivity Issue                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   ❌ Неправильно (двойной порт):                                │
+│   CVAT_NUCLIO_HOST=cvat-nuclio-dashboard:80                     │
+│   CVAT_NUCLIO_PORT=8070 (default)                               │
+│   URL: http://cvat-nuclio-dashboard:80:8070  ← Ошибка парсинга │
+│                                                                  │
+│   ❌ Неправильно (дефолтный порт):                              │
+│   CVAT_NUCLIO_HOST=cvat-nuclio-dashboard                        │
+│   CVAT_NUCLIO_PORT=8070 (default)                               │
+│   URL: http://cvat-nuclio-dashboard:8070    ← Connection refused│
+│                                                                  │
+│   ✅ Правильно:                                                  │
+│   CVAT_NUCLIO_HOST=cvat-nuclio-dashboard                        │
+│   CVAT_NUCLIO_PORT=80                                           │
+│   URL: http://cvat-nuclio-dashboard:80      ← Работает!        │
+│                                                                  │
+│   Kubernetes Service mapping:                                    │
+│   cvat-nuclio-dashboard:80 ──► nuclio-dashboard pod:8070       │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Проверка после исправления:**
+
+1. Открыть CVAT UI: http://192.168.20.235
+2. Перейти в любую задачу → Jobs → Open
+3. Нажать на иконку AI Tools (волшебная палочка)
+4. Должен появиться список моделей (YOLOv7, YOLOv11, etc.)
+
+#### Автоаннотация: "Invocation URL is required"
+
+**Симптом:** Модели отображаются в списке, но при запуске автоаннотации ошибка:
+```
+Automatic annotation failed
+500 Server Error: Internal Server Error
+```
+
+В логах Nuclio Dashboard:
+```
+Failed to invoke function
+err: "Failed to resolve invocation url"
+"Invocation URL is required"
+X-Nuclio-Invoke-Via: "domain-name"
+```
+
+**Причина:** CVAT использует `x-nuclio-invoke-via: domain-name` при вызове функций через Nuclio Dashboard. Это означает, что Dashboard должен знать URL функции для проксирования запроса. Если функция не имеет `internalInvocationUrls` или `externalInvocationUrls`, Dashboard не может её вызвать.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│            Function Invocation URL Problem                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   CVAT Worker                                                    │
+│       │                                                          │
+│       │ POST /api/function_invocations                          │
+│       │ X-Nuclio-Function-Name: yolo11x-cvat-detector-gpu       │
+│       │ X-Nuclio-Invoke-Via: domain-name                        │
+│       ▼                                                          │
+│   ┌────────────────────┐                                        │
+│   │ Nuclio Dashboard   │                                        │
+│   │                    │                                        │
+│   │ 1. Lookup function │                                        │
+│   │ 2. Get invocation  │  ← Если internalInvocationUrls = None │
+│   │    URL             │     → "Invocation URL is required"     │
+│   │ 3. Proxy request   │                                        │
+│   └────────────────────┘                                        │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Диагностика:**
+
+```bash
+# Проверить invocation URLs функции
+kubectl exec -n cvat deploy/cvat-backend-server -- \
+  curl -s http://cvat-nuclio-dashboard:80/api/functions/yolo11x-cvat-detector-gpu | \
+  python3 -c "import sys,json; d=json.load(sys.stdin); \
+    print('httpPort:', d.get('status',{}).get('httpPort')); \
+    print('externalIP:', d.get('status',{}).get('externalInvocationUrls')); \
+    print('internalIP:', d.get('status',{}).get('internalInvocationUrls'))"
+
+# Если internalIP = None — проблема в конфигурации функции
+```
+
+**Решение:**
+
+Проблема возникает когда функция была создана с кастомным портом в triggers или без `serviceType: ClusterIP`. Нужно пересоздать функцию с правильной конфигурацией.
+
+**1. Исправить function.yaml:**
+
+```yaml
+# НЕПРАВИЛЬНО (кастомный порт, нет serviceType):
+triggers:
+  myHttpTrigger:
+    kind: http
+    attributes:
+      maxRequestBodySize: 33554432
+      port: 38888  # ← Убрать!
+
+# ПРАВИЛЬНО:
+triggers:
+  myHttpTrigger:
+    kind: http
+    attributes:
+      maxRequestBodySize: 33554432
+      serviceType: ClusterIP  # ← Добавить!
+```
+
+**2. Пересоздать функцию:**
+
+```bash
+# Удалить старую функцию
+nuctl delete function yolo11x-cvat-detector-gpu --namespace cvat --platform kube
+
+# Задеплоить заново
+nuctl deploy --project-name cvat \
+  --path /path/to/serverless/custom/nuclio \
+  --namespace cvat \
+  --platform kube \
+  --registry docker.io/your-user
+
+# Ожидаемый вывод:
+# "internalInvocationURLs": ["nuclio-yolo11x-cvat-detector-gpu.cvat.svc.cluster.local:8080"]
+```
+
+**3. Проверить:**
+
+```bash
+# После деплоя должен появиться internal URL
+kubectl get nucliofunctions yolo11x-cvat-detector-gpu -n cvat \
+  -o jsonpath='{.status.internalInvocationUrls}'
+# Ожидаемо: ["nuclio-yolo11x-cvat-detector-gpu.cvat.svc.cluster.local:8080"]
+```
+
+**Устойчивость к рестарту:**
+
+Все настройки сохраняются в Kubernetes объектах:
+- `CVAT_NUCLIO_*` переменные сохранены в Deployment spec
+- NuclioFunction CRD сохраняет конфигурацию функции
+- При рестарте кластера всё восстановится автоматически
+
 #### DiskPressure на GPU ноде
 
 **Симптом:** Pod evicted, статус Error, в events:
@@ -998,8 +1637,12 @@ kubectl describe node polydev-desktop | grep DiskPressure
 ## См. также
 
 - [[K3s]]
+- [[K3s - Архитектура]] — схема взаимодействия сервисов
+- [[Kubernetes - Сеть и взаимодействие]] — теория networking
+- [[Services]] — типы сервисов, порты
 - [[MetalLB]]
 - [[MinIO]] — S3 storage для данных
+- [[ClearML]] — MLOps платформа
 - [[Longhorn]]
 - [[Helm]]
 - [[polydev-desktop]] — GPU нода для Nuclio функций

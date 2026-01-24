@@ -389,8 +389,12 @@ kubectl get pvc -n clearml
 ## См. также
 
 - [[K3s]]
+- [[K3s - Архитектура]] — схема взаимодействия сервисов
+- [[Kubernetes - Сеть и взаимодействие]] — теория networking
+- [[Services]] — типы сервисов, порты
 - [[Longhorn]]
 - [[MinIO]]
+- [[CVAT]]
 - [[MetalLB]]
 - [ClearML Documentation](https://clear.ml/docs/latest/)
 - [ClearML Helm Charts](https://github.com/allegroai/clearml-helm-charts)

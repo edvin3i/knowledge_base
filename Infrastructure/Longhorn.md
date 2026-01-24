@@ -4,7 +4,7 @@ tags:
   - storage
   - infrastructure
 created: 2026-01-19
-updated: 2026-01-20
+updated: 2026-01-22
 ---
 
 # Longhorn
@@ -503,6 +503,125 @@ kubectl -n longhorn-system logs -l longhorn.io/component=engine-manager
 kubectl -n longhorn-system patch volumes.longhorn.io <vol-name> \
   --type merge -p '{"spec":{"nodeID":""}}'
 ```
+
+### Volume Degraded: ReplicaSchedulingFailure
+
+**Симптом:** Volume показывает статус `degraded` в UI Longhorn или в kubectl.
+
+**Причина:** Longhorn не может разместить все реплики — недостаточно места на нодах.
+
+#### Теория: Как Longhorn планирует реплики
+
+Longhorn при создании volume размещает реплики на **разные ноды** (anti-affinity) для отказоустойчивости. Каждая нода имеет лимиты:
+
+```
+Allocated (занято) + New Replica ≤ Maximum (лимит ноды)
+```
+
+Если на всех подходящих нодах `Allocated + ReplicaSize > Maximum`, реплика остаётся в статусе `stopped` без привязки к ноде.
+
+#### Диагностика
+
+```bash
+# 1. Проверить статус volume
+kubectl get volumes.longhorn.io -n longhorn-system <volume-name> -o yaml | grep -A5 status
+
+# Искать:
+#   robustness: degraded
+#   message: insufficient storage
+#   reason: ReplicaSchedulingFailure
+
+# 2. Проверить реплики
+kubectl get replicas.longhorn.io -n longhorn-system \
+  -l longhornvolume=<volume-name> -o wide
+
+# Пример вывода:
+# NAME          STATE     NODE              ← stopped реплика без ноды
+# xxx-r-abc123  running   polydev-desktop
+# xxx-r-def456  running   polynode-1
+# xxx-r-ghi789  stopped                     ← проблемная реплика
+
+# 3. Проверить capacity нод
+kubectl get nodes.longhorn.io -n longhorn-system -o json | \
+  jq -r '.items[] | "\(.metadata.name): allocated=\(.status.diskStatus | to_entries[0].value.storageScheduled/1024/1024/1024 | floor)Gi max=\(.status.diskStatus | to_entries[0].value.storageMaximum/1024/1024/1024 | floor)Gi"'
+```
+
+#### Пример реальной проблемы
+
+Volume MinIO (100Gi) требовал 3 реплики:
+
+| Нода | Allocated | Max | Может вместить 100Gi? |
+|------|-----------|-----|----------------------|
+| polydev-desktop | 213 Gi | 1832 Gi | ✅ Да, но уже есть реплика |
+| polynode-1 | 125 Gi | 224 Gi | ✅ Да, но уже есть реплика |
+| polynode-2 | 138 Gi | 224 Gi | ❌ 138+100=238 > 224 |
+| polynode-3 | 138 Gi | 224 Gi | ❌ 138+100=238 > 224 |
+
+**Вывод:** Третья реплика не может быть размещена — все свободные ноды переполнены.
+
+#### Решения
+
+**Вариант 1: Уменьшить количество реплик (рекомендуется для standalone workloads)**
+
+Для приложений с одним подом (MinIO standalone, PostgreSQL) 2 реплики обеспечивают достаточную защиту:
+
+```bash
+kubectl patch volume <volume-name> \
+  -n longhorn-system \
+  --type=merge \
+  -p '{"spec":{"numberOfReplicas":2}}'
+
+# Longhorn автоматически удалит лишнюю stopped реплику
+```
+
+**Вариант 2: Увеличить storage over-provisioning**
+
+Позволяет выделять больше места, чем физически есть (рискованно):
+
+```bash
+# Текущее значение
+kubectl get settings.longhorn.io -n longhorn-system \
+  storage-over-provisioning-percentage -o jsonpath='{.value}'
+
+# Увеличить до 150%
+kubectl patch settings.longhorn.io storage-over-provisioning-percentage \
+  -n longhorn-system \
+  --type=merge \
+  -p '{"value":"150"}'
+```
+
+**Вариант 3: Разрешить несколько реплик на одной ноде**
+
+Отключить anti-affinity для конкретного volume:
+
+```bash
+kubectl patch volume <volume-name> \
+  -n longhorn-system \
+  --type=merge \
+  -p '{"spec":{"replicaSoftAntiAffinity":"true"}}'
+```
+
+⚠️ **Риск:** Если нода с двумя репликами упадёт — потеря данных возможна.
+
+**Вариант 4: Добавить storage**
+
+- Добавить диск на существующую ноду (см. [[#Добавление дополнительных дисков]])
+- Добавить новую ноду в кластер
+
+#### Проверка после исправления
+
+```bash
+# Статус должен стать healthy
+kubectl get volumes.longhorn.io -n longhorn-system <volume-name> \
+  -o jsonpath='{.status.robustness}'
+# Ожидаемый вывод: healthy
+
+# Все реплики running
+kubectl get replicas.longhorn.io -n longhorn-system \
+  -l longhornvolume=<volume-name>
+```
+
+---
 
 ### Нода Unschedulable (overallocation)
 
