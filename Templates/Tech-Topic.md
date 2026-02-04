@@ -1,7 +1,8 @@
 ---
 tags:
-  -
-created: {{date}}
+  - 
+created:
+  "{ date }":
 ---
 
 # {{title}}
