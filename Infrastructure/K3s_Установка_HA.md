@@ -48,7 +48,7 @@ updated: 2026-01-19
 | 3   | 2      | 1                 |
 | 5   | 3      | 2                 |
 
-> **Важно:** 2 ноды хуже чем 1 — при падении любой кворум теряется.
+> **Важно:** 2 ноды хуже чем 1. У 1-нодового кластера тоже 0 допустимых падений, но 2-нодовый кластер уязвим не только к падению ноды, но и к **network partition** — если связь между нодами теряется, обе не могут получить кворум, и весь кластер замирает. С 1 нодой этого сценария просто нет.
 
 ---
 
@@ -188,7 +188,7 @@ openssl rand -base64 32
 curl -sfL https://get.k3s.io | K3S_TOKEN=<YOUR_TOKEN> sh -s - server \
     --cluster-init \
     --tls-san 192.168.20.225 \
-    --disable servicelb \
+    --disable=servicelb \
     --write-kubeconfig-mode 644
 ```
 
@@ -212,7 +212,7 @@ curl -sfL https://get.k3s.io | K3S_TOKEN=<YOUR_TOKEN> sh -s - server \
 | `server` | Запустить как server (control plane + agent) |
 | `--cluster-init` | Инициализировать новый HA кластер с embedded etcd |
 | `--tls-san 192.168.20.225` | Добавить VIP в SAN сертификата API server |
-| `--disable servicelb` | Отключить встроенный LoadBalancer (ServiceLB/Klipper) |
+| `--disable=servicelb` | Отключить встроенный LoadBalancer (ServiceLB/Klipper) |
 | `--write-kubeconfig-mode 644` | Права на kubeconfig (читаемый всеми) |
 
 **Подробнее о флагах:**
@@ -223,8 +223,8 @@ curl -sfL https://get.k3s.io | K3S_TOKEN=<YOUR_TOKEN> sh -s - server \
 **`--tls-san` (Subject Alternative Name)**
 TLS сертификат API server содержит список разрешённых имён/IP. Клиент проверяет, что подключается к правильному серверу. VIP должен быть в этом списке, иначе kubectl откажется подключаться.
 
-**`--disable servicelb`**
-K3s включает ServiceLB (Klipper) — простой LoadBalancer для bare-metal. Мы используем [[K3s - kube-vip|kube-vip]] вместо него.
+**`--disable=servicelb`**
+K3s включает ServiceLB (Klipper) — простой LoadBalancer для bare-metal. Мы используем [[MetalLB]] для Service LoadBalancer, поэтому отключаем встроенный. ([[K3s - kube-vip|kube-vip]] решает другую задачу — VIP для API Server, не для Service LoadBalancer.)
 
 **`--write-kubeconfig-mode 644`**
 По умолчанию kubeconfig доступен только root (600). С 644 его могут читать все пользователи.
@@ -239,7 +239,7 @@ K3s включает ServiceLB (Klipper) — простой LoadBalancer для 
 curl -sfL https://get.k3s.io | K3S_TOKEN=<YOUR_TOKEN> sh -s - server \
     --server https://192.168.20.225:6443 \
     --tls-san 192.168.20.225 \
-    --disable servicelb \
+    --disable=servicelb \
     --write-kubeconfig-mode 644
 ```
 

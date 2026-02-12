@@ -41,12 +41,13 @@ S3-совместимое объектное хранилище в [[K3s]] кл�
 │              │  - clearml       │                          │
 │              │  - datasets      │                          │
 │              │  - models        │                          │
+│              │  - footage       │                          │
 │              └────────┬─────────┘                          │
 │                       │                                     │
 │                       ▼                                     │
 │              ┌──────────────────┐                          │
 │              │  Longhorn PVC    │                          │
-│              │     100Gi        │                          │
+│              │     500Gi        │                          │
 │              └──────────────────┘                          │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
@@ -60,7 +61,7 @@ S3-совместимое объектное хранилище в [[K3s]] кл�
 |----------|----------|
 | **Namespace** | `minio` |
 | **Mode** | Standalone |
-| **Storage** | 100Gi ([[Longhorn]]) |
+| **Storage** | 500Gi ([[Longhorn]], polydev-desktop) |
 | **API IP** | 192.168.20.237 |
 | **Console IP** | 192.168.20.238 |
 
@@ -68,10 +69,10 @@ S3-совместимое объектное хранилище в [[K3s]] кл�
 
 ## Доступ
 
-| Сервис | URL | Назначение |
-|--------|-----|------------|
-| **MinIO API** | http://192.168.20.237 | S3 API для приложений |
-| **MinIO Console** | http://192.168.20.238 | Web UI управления |
+| Сервис            | URL                   | Назначение            |
+| ----------------- | --------------------- | --------------------- |
+| **MinIO API**     | http://192.168.20.237 | S3 API для приложений |
+| **MinIO Console** | http://192.168.20.238 | Web UI управления     |
 
 **Credentials:**
 - **User:** `fsadm`
@@ -95,7 +96,7 @@ replicas: 1
 
 persistence:
   enabled: true
-  size: 100Gi
+  size: 500Gi
   storageClass: longhorn
 
 resources:
@@ -120,6 +121,8 @@ buckets:
   - name: datasets
     policy: none
   - name: models
+    policy: none
+  - name: footage
     policy: none
 EOF
 
@@ -353,15 +356,49 @@ kubectl create secret generic minio-credentials \
 
 | Bucket | Назначение |
 |--------|------------|
-| `cvat` | Данные [[CVAT]] (изображения, видео) |
+| `cvat` | Экспорты и бэкапы [[CVAT]] |
 | `clearml` | Артефакты [[ClearML]] (модели, датасеты) |
-| `datasets` | ML датасеты |
+| `datasets` | ML датасеты (source для CVAT) |
 | `models` | Обученные модели |
+| `footage` | Сырые записи с камеры (футажи) |
 
 Создать bucket через Console или mc:
 
 ```bash
-mc mb homelab/my-new-bucket
+mcli mb homelab/my-new-bucket
+```
+
+### Bucket `datasets` — структура
+
+```
+datasets/
+├── polyvision-cls-4-v1.1.6/              ← Текущий датасет (4 класса, 1495 изобр.)
+│   ├── Centre-sportif-Max-Rousie-Match-24-01-2026/
+│   │   └── images/                        ← .jpg + .txt (YOLO аннотации)
+│   ├── nrt_Maryse-Hilsz-Sports-Center_2026-02-04_214315/
+│   │   └── images/
+│   └── polyvision-cls-5-v1.1/
+│       └── images/Train/
+│
+├── polyvision-cls-5-v1.1/                ← Исходный датасет (5 классов)
+│   └── Polyvision_dataset_five_classes_v1.1/
+│       ├── images/ (Train/, Validation/)
+│       └── labels/ (Train/, Validation/)
+│
+├── nrt_Centre-sportif-Max-Rousie_2026-01-28_111531/    ← Полный NRT датасет
+├── nrt_Maryse-Hilsz-Sports-Center_2026-02-04_214315/   ← Полный NRT датасет
+└── nrt_Vincennes-Athletic-2025-11-23.../                ← Полный NRT датасет
+```
+
+**Конвенция именования:**
+- `polyvision-cls-{N}-v{X.Y.Z}` — курированный датасет с N классами, версия X.Y.Z
+- `nrt_{location}_{date}` — сырой NRT датасет с конкретной локации
+
+Загрузка датасета:
+
+```bash
+# Загрузить директорию с изображениями и аннотациями
+mcli cp --recursive /local/path/to/dataset/ homelab/datasets/dataset-name/
 ```
 
 ---
@@ -404,6 +441,177 @@ sdk {
         default_output_uri: "s3://192.168.20.237:80/clearml"
     }
 }
+```
+
+---
+
+## Процедура: Расширение PVC до 500Gi и создание bucket footage
+
+### Контекст
+
+Для хранения сырых записей с камеры (футажей) потребовалось расширить MinIO PVC с 100Gi до 500Gi. Volume привязан к [[polydev-desktop]], где есть достаточно места на диске `/mnt/longhorn`.
+
+### Исходное состояние
+
+| Параметр | Значение |
+|----------|----------|
+| PVC size | 100Gi |
+| Replicas | 2 |
+| Longhorn volume | привязан к polydev-desktop + polynode-X |
+| Disk tags | нет |
+
+### Шаги
+
+#### 1. Настроить disk tag в Longhorn
+
+Добавить тег `large-storage` на диск `/mnt/longhorn` ноды polydev-desktop, чтобы можно было привязать volume к конкретному диску.
+
+**Через UI:** Longhorn UI → Node → polydev-desktop → Edit Node and Disks → диск `/mnt/longhorn` → Tags → добавить `large-storage` → Save
+
+**Через kubectl:**
+
+```bash
+# Посмотреть текущую конфигурацию дисков
+kubectl -n longhorn-system get nodes.longhorn.io polydev-desktop -o yaml
+
+# Добавить тег large-storage на диск /mnt/longhorn
+# В spec.disks найти диск с path: /mnt/longhorn и добавить tags:
+kubectl -n longhorn-system edit nodes.longhorn.io polydev-desktop
+```
+
+```yaml
+spec:
+  disks:
+    mnt-disk:
+      allowScheduling: true
+      path: /mnt/longhorn
+      storageReserved: 0
+      tags:
+        - large-storage
+```
+
+#### 2. Уменьшить реплики volume до 1
+
+Перед расширением уменьшаем количество реплик до 1. Это нужно, чтобы при expand volume не было конфликтов с репликами на маленьких нодах.
+
+```bash
+# Узнать имя volume
+kubectl get pvc -n minio
+# NAME    STATUS   VOLUME                                     CAPACITY
+# minio   Bound    pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   100Gi
+
+# Уменьшить до 1 реплики
+kubectl -n longhorn-system patch volumes.longhorn.io \
+  pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+  --type=merge \
+  -p '{"spec":{"numberOfReplicas":1}}'
+```
+
+Дождаться, пока Longhorn удалит лишнюю реплику (проверить в UI или):
+
+```bash
+kubectl get replicas.longhorn.io -n longhorn-system \
+  -l longhornvolume=pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+# Должна остаться 1 реплика в состоянии running
+```
+
+#### 3. Привязать volume к ноде и диску
+
+Установить `nodeSelector` и `diskSelector`, чтобы единственная реплика была на polydev-desktop на диске с тегом `large-storage`.
+
+```bash
+kubectl -n longhorn-system patch volumes.longhorn.io \
+  pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+  --type=merge \
+  -p '{"spec":{"nodeSelector":["polydev-desktop"],"diskSelector":["large-storage"]}}'
+```
+
+> **Примечание:** Подробнее о disk tags и selectors см. [[Longhorn#Disk Tags и Node/Disk Selectors]].
+
+#### 4. Расширить PVC до 500Gi
+
+```bash
+kubectl patch pvc minio -n minio \
+  --type=merge \
+  -p '{"spec":{"resources":{"requests":{"storage":"500Gi"}}}}'
+```
+
+Проверить, что Longhorn расширил volume:
+
+```bash
+# PVC status
+kubectl get pvc -n minio
+# CAPACITY должен стать 500Gi (может потребоваться время)
+
+# Longhorn volume
+kubectl get volumes.longhorn.io -n longhorn-system \
+  pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+  -o jsonpath='{.spec.size}'
+```
+
+#### 5. Вернуть 2 реплики
+
+После расширения вернуть 2 реплики для отказоустойчивости:
+
+```bash
+kubectl -n longhorn-system patch volumes.longhorn.io \
+  pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+  --type=merge \
+  -p '{"spec":{"numberOfReplicas":2}}'
+```
+
+#### 6. Создать bucket footage
+
+```bash
+mcli mb homelab/footage
+```
+
+Или через MinIO Console: http://192.168.20.238 → Buckets → Create Bucket → `footage`.
+
+### Верификация
+
+```bash
+# 1. PVC расширен
+kubectl get pvc -n minio
+# NAME    STATUS   VOLUME   CAPACITY   ACCESS MODES
+# minio   Bound    ...      500Gi      RWO
+
+# 2. Volume healthy
+kubectl get volumes.longhorn.io -n longhorn-system \
+  pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+  -o jsonpath='{.status.robustness}'
+# healthy
+
+# 3. Реплики running
+kubectl get replicas.longhorn.io -n longhorn-system \
+  -l longhornvolume=pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -o wide
+
+# 4. Bucket существует
+mcli ls homelab/footage
+
+# 5. MinIO видит новый размер
+mcli admin info homelab
+```
+
+### Риски и замечания
+
+| Риск | Описание | Митигация |
+|------|----------|-----------|
+| Downtime при expand | Pod MinIO может быть перезапущен | Выполнять в maintenance window |
+| Одна реплика временно | На шагах 2–5 данные без redundancy | Минимизировать время на 1 реплике |
+| Большой volume на одном диске | Все 500Gi на polydev-desktop | Мониторить свободное место |
+
+### ILM Lifecycle (будущее)
+
+Для управления сырым футажём рекомендуется настроить ILM lifecycle policy — автоматическое удаление или перемещение старых объектов:
+
+```bash
+# Пример: удалять объекты из footage/ старше 90 дней
+mcli ilm rule add homelab/footage \
+  --expire-days 90
+
+# Проверить правила
+mcli ilm rule ls homelab/footage
 ```
 
 ---

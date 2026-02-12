@@ -5,7 +5,7 @@ tags:
   - annotation
   - infrastructure
 created: 2026-01-19
-updated: 2026-01-22
+updated: 2026-01-29
 ---
 
 # CVAT
@@ -224,7 +224,7 @@ cvat:
     enabled: true
     defaultStorage:
       enabled: true
-      size: 20Gi
+      size: 30Gi
 
 postgresql:
   enabled: true
@@ -383,7 +383,7 @@ CVAT использует [[Longhorn]] для хранения:
 | PVC | Назначение | Размер |
 |-----|------------|--------|
 | `cvat-backend-data` | Данные проектов, задач | 50Gi |
-| `cvat-kvrocks-data` | KVRocks storage | 20Gi |
+| `cvat-kvrocks-data` | KVRocks storage | 50Gi (расширен с 35Gi 2026-02-10, с 30Gi 2026-02-06, с 20Gi 2026-01-29), 1 реплика на polydev-desktop |
 | `data-cvat-postgresql-0` | PostgreSQL | 10Gi |
 | `data-cvat-clickhouse-shard0-0` | ClickHouse | 10Gi |
 
@@ -800,24 +800,348 @@ s3://cvat/exports/polyvision/annotations_yolo_2026-01-22.zip
 s3://cvat/backups/polyvision_v1_backup_2026_01_22_12_30.zip
 ```
 
+### Создание проекта и импорт аннотаций через REST API
+
+Для автоматизации создания проектов, задач и импорта аннотаций используется CVAT REST API.
+
+#### 1. Получение API-токена
+
+```bash
+# Через Django shell в backend pod
+kubectl exec -n cvat deploy/cvat-backend-server -- python3 -c "
+import django, os
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'cvat.settings.production')
+django.setup()
+from rest_framework.authtoken.models import Token
+from django.contrib.auth.models import User
+
+user = User.objects.get(username='Ivan89')
+token, created = Token.objects.get_or_create(user=user)
+print(token.key)
+"
+```
+
+#### 2. Создание проекта с лейблами
+
+```bash
+CVAT_TOKEN="your-token-here"
+
+curl -s -X POST "http://192.168.20.235/api/projects" \
+  -H "Authorization: Token $CVAT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Organization: Ploycube" \
+  -d '{
+    "name": "Project Name",
+    "labels": [
+      {"name": "ball", "color": "#ff6600", "type": "any"},
+      {"name": "player", "color": "#00ff00", "type": "any"},
+      {"name": "side_referee", "color": "#0066ff", "type": "any"},
+      {"name": "main_referee", "color": "#ff0066", "type": "any"}
+    ],
+    "target_storage": {"location": "cloud_storage", "cloud_storage_id": 3}
+  }'
+# cloud_storage_id: 3 = MinIO CVAT Internal (org: Ploycube)
+# cloud_storage_id: 4 = MinIO Datasets (org: Ploycube)
+```
+
+#### 3. Создание задачи из Cloud Storage
+
+**Два этапа:** сначала создать Task (метаданные), затем POST `/data` (привязка файлов).
+
+**Параметры создания задачи:**
+
+| Параметр | Описание | Пример |
+|----------|----------|--------|
+| `name` | Имя задачи | `"Vincennes-Athletic-small_2026-02-10"` |
+| `project_id` | ID проекта (лейблы наследуются) | `4` |
+| `segment_size` | Кол-во изображений в одном Job | `1000` |
+| `source_storage` | Откуда читать изображения | `cloud_storage_id: 4` |
+| `target_storage` | Куда сохранять экспорт | `cloud_storage_id: 3` |
+
+**Параметры data payload:**
+
+| Параметр | Описание | Значения |
+|----------|----------|----------|
+| `cloud_storage_id` | **Обязательно!** ID Cloud Storage в payload | `4` |
+| `server_files` | Массив путей файлов внутри bucket | `["prefix/images/img1.jpg", ...]` |
+| `image_quality` | Качество сжатия JPEG chunks (1-100) | `70` (default), `100` (макс. качество, не lossless) |
+| `use_zip_chunks` | Упаковать chunks в zip | `true` |
+| `use_cache` | Кэшировать chunks | `true` |
+| `sorting_method` | Сортировка файлов | `"natural"` |
+
+> **ВАЖНО:** `cloud_storage_id` нужно указывать **и в задаче** (`source_storage`), **и в data payload**. Без `cloud_storage_id` в payload CVAT ищет файлы локально в `/home/django/share/` — даже если `source_storage` задачи указывает на cloud.
+
+> **image_quality и KVRocks:** При `image_quality=100` image chunks не сжимаются и кэшируются в KVRocks as-is. Для задач >1000 изображений это может заполнить KVRocks PVC (см. [[#KVRocks PVC заполнен (No space left on device)]]). Рекомендация: `70` для обычной разметки, `100` только если критично качество.
+
+```bash
+# Шаг 1: Создать задачу
+curl -s -X POST "http://192.168.20.235/api/tasks" \
+  -H "Authorization: Token $CVAT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Organization: Ploycube" \
+  -d '{
+    "name": "Task Name",
+    "project_id": 4,
+    "segment_size": 1000,
+    "source_storage": {
+      "location": "cloud_storage",
+      "cloud_storage_id": 4
+    },
+    "target_storage": {
+      "location": "cloud_storage",
+      "cloud_storage_id": 3
+    }
+  }'
+# Ответ: {"id": 19, "name": "Task Name", ...}
+TASK_ID=19
+
+# Шаг 2: Привязать файлы из MinIO
+# server_files — массив путей внутри bucket (без имени bucket)
+# ВАЖНО: cloud_storage_id обязателен в payload!
+curl -s -X POST "http://192.168.20.235/api/tasks/${TASK_ID}/data" \
+  -H "Authorization: Token $CVAT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Organization: Ploycube" \
+  -d '{
+    "cloud_storage_id": 4,
+    "server_files": [
+      "nrt_Vincennes/images/000bb7fa63264008.jpg",
+      "nrt_Vincennes/images/000d05d4764b464e.jpg"
+    ],
+    "image_quality": 70,
+    "use_zip_chunks": true,
+    "use_cache": true,
+    "sorting_method": "natural"
+  }'
+# Ответ: {"rq_id": "action=create&target=task&target_id=19"} (HTTP 202)
+
+# Шаг 3: Отслеживать прогресс создания
+curl -s "http://192.168.20.235/api/requests/action%3Dcreate%26target%3Dtask%26target_id%3D${TASK_ID}" \
+  -H "Authorization: Token $CVAT_TOKEN" \
+  -H "X-Organization: Ploycube"
+# Ждать status=finished
+```
+
+**Полный пример: создание задачи из MinIO с помощью скрипта**
+
+При большом количестве файлов (>500) CVAT UI обрезает список из-за пагинации. API решает эту проблему:
+
+```bash
+#!/bin/bash
+# create-cvat-task.sh — создание задачи из MinIO Cloud Storage
+CVAT_TOKEN="your-token-here"
+CVAT_URL="http://192.168.20.235"
+PROJECT_ID=4
+SEGMENT_SIZE=1000
+IMAGE_QUALITY=70
+CLOUD_STORAGE_ID=4  # MinIO Datasets
+
+MINIO_PREFIX="nrt_Vincennes-Athletic-small_2026-02-10_201919/images"
+TASK_NAME="Vincennes-Athletic-small_2026-02-10_201919"
+
+# 1. Получить список файлов из MinIO
+echo "Listing files from MinIO..."
+mcli ls "homelab/datasets/${MINIO_PREFIX}/" | awk '{print $NF}' > /tmp/files.txt
+FILE_COUNT=$(wc -l < /tmp/files.txt)
+echo "Found ${FILE_COUNT} files"
+
+# 2. Создать задачу
+TASK_ID=$(curl -s -X POST "${CVAT_URL}/api/tasks" \
+  -H "Authorization: Token $CVAT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Organization: Ploycube" \
+  -d "{
+    \"name\": \"${TASK_NAME}\",
+    \"project_id\": ${PROJECT_ID},
+    \"segment_size\": ${SEGMENT_SIZE},
+    \"source_storage\": {
+      \"location\": \"cloud_storage\",
+      \"cloud_storage_id\": ${CLOUD_STORAGE_ID}
+    },
+    \"target_storage\": {
+      \"location\": \"cloud_storage\",
+      \"cloud_storage_id\": 3
+    }
+  }" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+echo "Created task #${TASK_ID}"
+
+# 3. Собрать JSON payload с server_files
+python3 -c "
+import json
+prefix = '${MINIO_PREFIX}/'
+with open('/tmp/files.txt') as f:
+    files = [prefix + line.strip() for line in f if line.strip()]
+payload = {
+    'cloud_storage_id': ${CLOUD_STORAGE_ID},
+    'server_files': files,
+    'image_quality': ${IMAGE_QUALITY},
+    'use_zip_chunks': True,
+    'use_cache': True,
+    'sorting_method': 'natural'
+}
+with open('/tmp/data_payload.json', 'w') as out:
+    json.dump(payload, out)
+print(f'Payload ready: {len(files)} files')
+"
+
+# 4. Отправить данные
+curl -s -X POST "${CVAT_URL}/api/tasks/${TASK_ID}/data" \
+  -H "Authorization: Token $CVAT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Organization: Ploycube" \
+  -d @/tmp/data_payload.json
+echo ""
+
+# 5. Ждать завершения
+RQ_ID="action%3Dcreate%26target%3Dtask%26target_id%3D${TASK_ID}"
+while true; do
+  STATUS=$(curl -s "${CVAT_URL}/api/requests/${RQ_ID}" \
+    -H "Authorization: Token $CVAT_TOKEN" \
+    -H "X-Organization: Ploycube" | python3 -c "import json,sys; print(json.load(sys.stdin)['status'])")
+  echo "Status: ${STATUS}"
+  [ "$STATUS" = "finished" ] && break
+  [ "$STATUS" = "failed" ] && echo "FAILED!" && exit 1
+  sleep 10
+done
+
+echo "Task #${TASK_ID} ready: ${CVAT_URL}/tasks/${TASK_ID}"
+```
+
+#### 4. Импорт YOLO-аннотаций
+
+**ВАЖНО: Path matching для Cloud Storage задач**
+
+При создании задачи из Cloud Storage, CVAT сохраняет полный путь изображения из bucket (включая prefix). Аннотации в YOLO-zip должны соответствовать этой структуре.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│            YOLO Annotation Path Matching                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   CVAT хранит image path:                                       │
+│   polyvision-cls-4-v1.1.6/Centre-sportif/images/abc123.jpg     │
+│                                                                  │
+│   YOLO zip должен содержать:                                    │
+│   ├── obj.names                                                  │
+│   ├── obj.data                                                   │
+│   ├── train.txt                                                  │
+│   │   └─ data/obj_train_data/Centre-sportif/images/abc123.jpg  │
+│   └── obj_train_data/                                            │
+│       └── Centre-sportif/images/abc123.txt  ← аннотация        │
+│                                                                  │
+│   Ключ: путь в train.txt после "data/obj_train_data/"           │
+│   должен совпадать с путём в CVAT после prefix.                 │
+│                                                                  │
+│   ❌ НЕ работает: obj_train_data/abc123.txt (плоский путь)      │
+│   ✅ Работает: obj_train_data/Centre-sportif/images/abc123.txt  │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Загрузка аннотаций:**
+
+Если у задачи `source_storage=cloud_storage`, CVAT ищет файл аннотаций в Cloud Storage, а не в загруженных данных. Поэтому zip нужно сначала загрузить в MinIO:
+
+```bash
+# Загрузить zip в MinIO
+mcli cp annotations.zip homelab/datasets/annotations.zip
+
+# Импортировать, указав cloud_storage_id и filename
+curl -s -X POST \
+  "http://192.168.20.235/api/tasks/{task_id}/annotations?format=YOLO+1.1&filename=annotations.zip&location=cloud_storage&cloud_storage_id=4" \
+  -H "Authorization: Token $CVAT_TOKEN" \
+  -H "X-Organization: Ploycube"
+
+# Отслеживать прогресс
+curl -s "http://192.168.20.235/api/requests/action%3Dimport%26target%3Dtask%26target_id%3D{task_id}%26subresource%3Dannotations" \
+  -H "Authorization: Token $CVAT_TOKEN" \
+  -H "X-Organization: Ploycube"
+
+# Удалить временный zip из MinIO после импорта
+mcli rm homelab/datasets/annotations.zip
+```
+
+#### 5. Скрипт генерации YOLO-zip для импорта
+
+```python
+import os, glob, zipfile
+
+def create_yolo_annotation_zip(
+    annotation_dir: str,
+    class_names: list[str],
+    zip_path: str,
+    minio_prefix: str = ""
+):
+    """
+    Создать YOLO-zip для импорта в CVAT.
+
+    Args:
+        annotation_dir: Директория с .txt аннотациями (рекурсивный поиск)
+        class_names: Список классов в порядке ID
+        zip_path: Путь для выходного zip
+        minio_prefix: Prefix пути в MinIO (для train.txt)
+                       Если пусто — используются плоские имена файлов
+    """
+    train_lines = []
+    ann_files = {}
+
+    for txt in glob.glob(os.path.join(annotation_dir, '**', '*.txt'), recursive=True):
+        with open(txt) as f:
+            content = f.read().strip()
+        if not content:
+            continue
+
+        rel = os.path.relpath(txt, annotation_dir)
+        ann_zip_path = f'obj_train_data/{rel}'
+        train_lines.append(f'data/obj_train_data/{rel.replace(".txt", ".jpg")}')
+        ann_files[ann_zip_path] = content
+
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('obj.names', '\n'.join(class_names) + '\n')
+        zf.writestr('obj.data',
+            f'classes = {len(class_names)}\n'
+            'train = data/train.txt\n'
+            'names = data/obj.names\n'
+            'backup = backup/\n')
+        zf.writestr('train.txt', '\n'.join(sorted(train_lines)) + '\n')
+        for path, content in sorted(ann_files.items()):
+            zf.writestr(path, content + '\n')
+
+    print(f'Created {zip_path}: {len(ann_files)} annotations, '
+          f'{len(class_names)} classes')
+
+# Пример использования
+create_yolo_annotation_zip(
+    annotation_dir='/path/to/obj_Train_data',
+    class_names=['ball', 'player', 'side_referee', 'main_referee'],
+    zip_path='/tmp/annotations.zip'
+)
+```
+
 ### Структура данных в MinIO
 
 ```
 MinIO (192.168.20.237)
 │
 ├── datasets/                              ← Source Storage
-│   └── polyvision-cls-5-v1.1/
-│       └── Polyvision_dataset_five_classes_v1.1/
-│           ├── data.yaml
-│           ├── Train.txt
-│           ├── Validation.txt
-│           ├── manifest.jsonl             ← опционально
-│           ├── images/
-│           │   ├── Train/
-│           │   └── Validation/
-│           └── labels/
-│               ├── Train/
-│               └── Validation/
+│   ├── polyvision-cls-4-v1.1.6/          ← Текущий датасет (4 класса)
+│   │   ├── Centre-sportif-Max-Rousie-Match-24-01-2026/
+│   │   │   └── images/                    ← 853 изображения + аннотации
+│   │   ├── nrt_Maryse-Hilsz-Sports-Center_2026-02-04_214315/
+│   │   │   └── images/                    ← 251 изображение + аннотации
+│   │   └── polyvision-cls-5-v1.1/
+│   │       └── images/Train/              ← 391 изображение + аннотации
+│   │
+│   ├── polyvision-cls-5-v1.1/            ← Исходный датасет (5 классов)
+│   │   └── Polyvision_dataset_five_classes_v1.1/
+│   │       ├── data.yaml
+│   │       ├── Train.txt / Validation.txt
+│   │       ├── images/ (Train/, Validation/)
+│   │       └── labels/ (Train/, Validation/)
+│   │
+│   ├── nrt_Centre-sportif-Max-Rousie_2026-01-28_111531/
+│   ├── nrt_Maryse-Hilsz-Sports-Center_2026-02-04_214315/
+│   └── nrt_Vincennes-Athletic-2025-11-23_13-49-20_2026-02-05_134351/
 │
 ├── cvat/                                  ← Target Storage
 │   ├── exports/
@@ -892,7 +1216,7 @@ spec:
                       headers=headers,
                       json={
                           'filename': f'{name}_auto_{date}',
-                          'target_storage': {'location': 'cloud_storage', 'cloud_storage_id': 2}
+                          'target_storage': {'location': 'cloud_storage', 'cloud_storage_id': 3}  # MinIO CVAT Internal
                       }
                   )
                   print(f'Backup started for project: {name}')
@@ -1348,6 +1672,52 @@ kubectl logs -n cvat -l nuclio.io/function-name=<func-name>
 # - Неправильный handler
 ```
 
+#### Функция в состоянии Error / "Fetching inference status"
+
+**Симптом:** В CVAT UI постоянно появляется уведомление:
+```
+Fetching inference status for the ...
+Open the Browser Console to get details
+```
+
+**Причина:** CVAT периодически опрашивает Nuclio API (`GET /api/functions`). Если любая функция в состоянии `error` (например, неудачный билд Docker-образа), CVAT показывает уведомление — даже если эта функция не используется.
+
+**Диагностика:**
+
+```bash
+# Проверить статус всех функций
+curl -s http://192.168.20.236/api/functions | python3 -c "
+import json,sys
+for name, fn in json.load(sys.stdin).items():
+    state = fn.get('status',{}).get('state','?')
+    msg = fn.get('status',{}).get('message','')
+    print(f'{name}: {state}')
+    if msg: print(f'  error: {msg[:200]}')
+"
+
+# Проверить есть ли pod для функции
+kubectl get pods -n cvat -l nuclio.io/function-name=<func-name>
+```
+
+**Решение — удалить нерабочую функцию через API:**
+
+```bash
+# Удалить функцию через Nuclio Dashboard API
+curl -s -X DELETE "http://192.168.20.236/api/functions" \
+  -H "Content-Type: application/json" \
+  -d '{"metadata": {"name": "onnx-wongkinyiu-yolov7", "namespace": "cvat"}}'
+# HTTP 204 — успешно удалено
+
+# Проверить что осталось
+curl -s http://192.168.20.236/api/functions | python3 -c "
+import json,sys
+for name, fn in json.load(sys.stdin).items():
+    print(f'{name}: {fn[\"status\"][\"state\"]}')
+"
+```
+
+> **Примечание:** Если функция нужна, но билд упал — исправьте `function.yaml` и задеплойте заново через `nuctl deploy`.
+
 #### GPU не используется
 
 ```bash
@@ -1589,7 +1959,302 @@ kubectl get nucliofunctions yolo11x-cvat-detector-gpu -n cvat \
 - NuclioFunction CRD сохраняет конфигурацию функции
 - При рестарте кластера всё восстановится автоматически
 
-#### DiskPressure на GPU ноде
+#### GPU функция работает на CPU (torch.cuda.is_available() = False)
+
+**Симптом:** Функция с `nvidia.com/gpu: 1` запущена, но PyTorch не видит GPU:
+```bash
+kubectl exec -n cvat <pod> -- python3 -c "import torch; print(torch.cuda.is_available())"
+# CUDA available: False
+```
+
+**Причина:** Nuclio controller **не передаёт** `runtimeClassName` из function.yaml в Deployment template. Даже если указано:
+```yaml
+platform:
+  attributes:
+    runtimeClassName: nvidia
+```
+
+Nuclio сохраняет это в NuclioFunction CRD, но при создании Deployment не включает `runtimeClassName` в pod spec. В результате:
+- GPU "выделен" на уровне Kubernetes scheduler (pod запущен на GPU ноде)
+- Но контейнер использует обычный `runc` вместо `nvidia-container-runtime`
+- PyTorch не может обращаться к GPU драйверам
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│            RuntimeClass Problem in Nuclio                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   function.yaml                                                  │
+│       │                                                          │
+│       │ runtimeClassName: nvidia                                 │
+│       ▼                                                          │
+│   ┌────────────────────┐                                        │
+│   │ NuclioFunction CRD │  ← runtimeClassName сохранён           │
+│   └─────────┬──────────┘                                        │
+│             │                                                    │
+│             │ Nuclio Controller                                  │
+│             ▼                                                    │
+│   ┌────────────────────┐                                        │
+│   │    Deployment      │  ← runtimeClassName НЕ передан! ❌     │
+│   │  (no runtimeClass) │                                        │
+│   └─────────┬──────────┘                                        │
+│             │                                                    │
+│             ▼                                                    │
+│   ┌────────────────────┐                                        │
+│   │       Pod          │  ← Использует runc вместо nvidia       │
+│   │ CUDA: False        │                                        │
+│   └────────────────────┘                                        │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Диагностика:**
+
+```bash
+# Проверить runtimeClassName в NuclioFunction (есть)
+kubectl get nucliofunctions <func-name> -n cvat -o yaml | grep runtimeClassName
+# runtimeClassName: nvidia
+
+# Проверить runtimeClassName в Deployment (пусто)
+kubectl get deployment nuclio-<func-name> -n cvat \
+  -o jsonpath='{.spec.template.spec.runtimeClassName}'
+# (пустой вывод)
+
+# Проверить CUDA в контейнере
+kubectl exec -n cvat <pod> -- python3 -c "import torch; print('CUDA:', torch.cuda.is_available())"
+# CUDA: False
+```
+
+**Решение — патч Deployment:**
+
+```bash
+# Добавить runtimeClassName в deployment
+kubectl patch deployment nuclio-<func-name> -n cvat \
+  --type='json' \
+  -p='[{"op": "add", "path": "/spec/template/spec/runtimeClassName", "value": "nvidia"}]'
+
+# Дождаться rollout
+kubectl rollout status deployment nuclio-<func-name> -n cvat
+
+# Проверить GPU
+POD=$(kubectl get pods -n cvat -l nuclio.io/function-name=<func-name> -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n cvat $POD -- python3 -c "import torch; print('CUDA:', torch.cuda.is_available()); print('Device:', torch.cuda.get_device_name(0))"
+# CUDA: True
+# Device: NVIDIA RTX A6000
+```
+
+**Автоматизация:**
+
+Патч нужно применять после каждого `nuctl deploy`. Варианты автоматизации:
+
+1. **Bash-скрипт обёртка** — запускать вместо `nuctl deploy`:
+```bash
+#!/bin/bash
+# deploy-gpu-function.sh
+FUNC_NAME=$1
+NAMESPACE=${2:-cvat}
+
+nuctl deploy --project-name cvat \
+  --path "$PWD" \
+  --namespace "$NAMESPACE" \
+  --platform kube \
+  --registry docker.io/edvin3i
+
+# Ждём пока функция станет ready
+echo "Waiting for function to be ready..."
+sleep 10
+
+# Патчим deployment
+kubectl patch deployment "nuclio-$FUNC_NAME" -n "$NAMESPACE" \
+  --type='json' \
+  -p='[{"op": "add", "path": "/spec/template/spec/runtimeClassName", "value": "nvidia"}]'
+
+kubectl rollout status deployment "nuclio-$FUNC_NAME" -n "$NAMESPACE"
+echo "GPU function deployed successfully!"
+```
+
+2. **Kyverno Policy** — автоматически мутирует все deployments с `nvidia.com/gpu`:
+```yaml
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: add-nvidia-runtime-class
+spec:
+  rules:
+  - name: add-runtime-class-to-gpu-pods
+    match:
+      resources:
+        kinds:
+        - Deployment
+        namespaces:
+        - cvat
+    mutate:
+      patchStrategicMerge:
+        spec:
+          template:
+            spec:
+              runtimeClassName: nvidia
+    preconditions:
+      all:
+      - key: "{{ request.object.spec.template.spec.containers[0].resources.limits.\"nvidia.com/gpu\" || '' }}"
+        operator: GreaterThan
+        value: "0"
+```
+
+3. **Mutating Webhook** — кастомный webhook для полного контроля
+
+**Рекомендация:** Использовать bash-скрипт для простоты или Kyverno для полной автоматизации.
+
+> Подробное сравнение Policy Engines и обоснование выбора Kyverno: [[Kubernetes - Policy Engines]]
+
+#### KVRocks PVC заполнен (No space left on device)
+
+**Симптом:** CVAT перестаёт работать, в логах Redis/KVRocks:
+```
+redis.exceptions.ResponseError: IO error: No space left on device:
+While appending to file: /var/lib/kvrocks/db/000514.log: No space left on device
+```
+
+**Причина:** PVC для KVRocks (20Gi по умолчанию) заполняется SST файлами RocksDB и архивными WAL логами. Архивные WAL логи в `/var/lib/kvrocks/db/archive/` — это уже записанные в SST данные, которые KVRocks хранит на случай восстановления.
+
+**Теория:** KVRocks — key-value БД на основе RocksDB, которую CVAT использует вместо Redis для хранения кэша аннотаций и метаданных. RocksDB записывает данные сначала в WAL (Write-Ahead Log), затем компактирует в SST файлы. Архивные WAL (`archive/`) безопасно удалять — они уже компактированы.
+
+**Диагностика:**
+
+```bash
+# Проверить заполненность PVC
+kubectl exec -i cvat-kvrocks-0 -n cvat -- df -h /var/lib/kvrocks/db
+
+# Проверить размер архива (используй -i без -t, иначе kubectl panic)
+kubectl exec -i cvat-kvrocks-0 -n cvat -- sh -c 'du -sh /var/lib/kvrocks/db/archive'
+
+# Посмотреть общее распределение
+kubectl exec -i cvat-kvrocks-0 -n cvat -- sh -c 'du -sh /var/lib/kvrocks/db/*'
+```
+
+**Быстрое решение — очистить архив WAL:**
+
+```bash
+# Удалить архивные WAL логи (безопасно — данные уже в SST)
+kubectl exec -i cvat-kvrocks-0 -n cvat -- sh -c 'rm -rf /var/lib/kvrocks/db/archive/*'
+
+# Проверить освобождённое место
+kubectl exec -i cvat-kvrocks-0 -n cvat -- df -h /var/lib/kvrocks/db
+```
+
+**Долгосрочное решение — расширить PVC через Longhorn:**
+
+```bash
+# Проверить имя PVC
+kubectl get pvc -n cvat | grep kvrocks
+# cvat-kvrocks-data-cvat-kvrocks-0
+
+# Проверить что StorageClass разрешает расширение
+kubectl get storageclass longhorn -o yaml | grep allowVolumeExpansion
+# Если false:
+# kubectl patch storageclass longhorn -p '{"allowVolumeExpansion": true}'
+
+# Расширить PVC (Longhorn admission webhook проверяет доступное место на диске ноды)
+kubectl patch pvc cvat-kvrocks-data-cvat-kvrocks-0 -n cvat \
+  -p '{"spec":{"resources":{"requests":{"storage":"30Gi"}}}}'
+
+# Если ошибка "cannot schedule N more bytes to disk" — на ноде не хватает места
+# для реплик. Workaround: временно уменьшить numberOfReplicas до 1, удалив
+# реплики с тесных нод, расширить PVC, затем вернуть реплики.
+#
+# Проверить headroom на нодах:
+# kubectl get nodes.longhorn.io -n longhorn-system -o json | python3 -c "..."
+#
+# Уменьшить реплики (оставить только polydev-desktop):
+# VOLUME=pvc-b6631e93-4992-4683-a04c-25bb748fa564
+# kubectl patch volume $VOLUME -n longhorn-system --type merge \
+#   -p '{"spec":{"numberOfReplicas":1}}'
+# kubectl delete replicas.longhorn.io <replica-name> -n longhorn-system
+#
+# После расширения — вернуть реплики:
+# kubectl patch volume $VOLUME -n longhorn-system --type merge \
+#   -p '{"spec":{"numberOfReplicas":2}}'
+
+# После расширения PVC — рестарт pod для подхвата нового размера ФС
+kubectl delete pod cvat-kvrocks-0 -n cvat
+# StatefulSet пересоздаст pod автоматически
+
+# Проверить новый размер
+kubectl exec -i cvat-kvrocks-0 -n cvat -- df -h /var/lib/kvrocks/db
+```
+
+**Радикальное решение — очистить image cache (FLUSHDB + COMPACT):**
+
+Если архив WAL маленький, а место занимают SST файлы (закэшированные image chunks) — нужно сбросить кэш целиком. CVAT перезагрузит изображения из MinIO по запросу.
+
+```bash
+# Проверить количество и размер SST файлов
+kubectl exec -i cvat-kvrocks-0 -n cvat -- sh -c 'ls /var/lib/kvrocks/db/*.sst | wc -l'
+kubectl exec -i cvat-kvrocks-0 -n cvat -- sh -c 'du -sh /var/lib/kvrocks/db/*.sst' | tail -5
+
+# Сбросить весь кэш
+kubectl exec -i cvat-kvrocks-0 -n cvat -- \
+  redis-cli -a cvat_kvrocks -p 6666 FLUSHDB
+# OK
+
+# ВАЖНО: FLUSHDB только маркирует записи tombstones!
+# RocksDB не освобождает место до compaction.
+# Нужно принудительно запустить compaction:
+kubectl exec -i cvat-kvrocks-0 -n cvat -- \
+  redis-cli -a cvat_kvrocks -p 6666 COMPACT
+# OK (compaction занимает 30-60 секунд)
+
+# Проверить результат (подождать ~30 сек)
+sleep 30
+kubectl exec -i cvat-kvrocks-0 -n cvat -- df -h /var/lib/kvrocks/db
+```
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│        KVRocks Cache — Как это работает                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   CVAT cache "media":                                            │
+│     backend = django.core.cache.backends.redis.RedisCache        │
+│     location = redis://:cvat_kvrocks@cvat-kvrocks:6666          │
+│     timeout = 86400 (24 часа TTL)                                │
+│                                                                  │
+│   Что кэшируется:                                                │
+│   - Декодированные image chunks (группы кадров)                  │
+│   - Размер chunk зависит от image_quality:                       │
+│     • quality=70  → ~50-100MB на chunk (сжатие JPEG)            │
+│     • quality=100 → ~200-300MB на chunk (без сжатия)            │
+│                                                                  │
+│   Проблема:                                                      │
+│   - Auto-annotation кэширует ВСЕ кадры задачи                   │
+│   - Задача 3930 imgs × quality=100 ≈ 40-50GB кэша              │
+│   - TTL 24ч → старые записи не вытесняются быстро              │
+│                                                                  │
+│   RocksDB storage:                                               │
+│   WAL → компактируется → SST файлы (~256MB каждый)              │
+│   archive/ → отработанные WAL (безопасно удалять)               │
+│                                                                  │
+│   Освобождение места:                                            │
+│   1. rm archive/* → освобождает WAL                              │
+│   2. FLUSHDB → маркирует tombstones (место НЕ освобождается!)   │
+│   3. COMPACT → перезаписывает SST, удаляя tombstones            │
+│                                                                  │
+│   Пример: 344 SST × 128MB = 44GB → FLUSHDB+COMPACT → 161MB    │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Примечание:** При `kubectl exec` в kvrocks pod использовать `-i` без `-t`, иначе возможен panic kubectl из-за бага terminalSizeQueueAdapter в старых версиях.
+
+---
+
+**Инцидент 2026-01-29:** PVC 20Gi заполнен на 97% (19GB из 20GB). Архив WAL занимал 5.8GB. После очистки архива — 65% (13GB из 20GB). PVC расширен до 30Gi.
+
+**Инцидент 2026-02-10:** PVC 35Gi заполнен на 100% (35G/35G). Симптом: CVAT 500 "Could not receive image data". В логах backend: `redis.exceptions.ResponseError: IO error: No space left on device: While appending to file: /var/lib/kvrocks/db/005718.log`. Архив WAL занимал 2.9G. Очистка архива дала 92% (32G/35G). Расширение до 50Gi блокировалось Longhorn admission webhook — на нодах polynode-2 и polynode-3 не хватало headroom для 50Gi реплики (headroom ~4.5Gi и ~39.5Gi). Решение: уменьшить numberOfReplicas до 1 (только polydev-desktop с headroom 1348Gi), вручную удалить реплики с worker нод, расширить PVC до 50Gi, рестарт pod. Результат: 50Gi, 32G используется (65%), 1 реплика. Вторая реплика не создана — ни одна worker нода не имеет 50Gi headroom.
+
+**Инцидент 2026-02-11:** PVC 50Gi заполнен на 100% (49G/50G) менее чем за сутки после расширения. Причина: auto-annotation (inference) на задаче #19 (3930 imgs, `image_quality=100`) закэшировал все кадры — 344 SST файла по ~128MB. Симптом: в Browser Console — `Inference status for task 19 is failed`, traceback до `redis.exceptions.ResponseError: IO error: No space left on device`. Решение: `FLUSHDB` + `COMPACT` → 161MB / 50GB (1%). Вывод: `image_quality=100` + inference на крупных задачах = быстрое заполнение KVRocks. Рекомендация: использовать `image_quality=70` для задач с auto-annotation.
+
+### DiskPressure на GPU ноде
 
 **Симптом:** Pod evicted, статус Error, в events:
 ```

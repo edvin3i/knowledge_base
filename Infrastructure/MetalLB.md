@@ -48,6 +48,10 @@ traefik   LoadBalancer   192.168.20.235   ← IP из пула MetalLB
 - MetalLB отвечает на ARP запросы для выделенных IP
 - Не требует настройки роутера
 - Ограничение: весь трафик идёт через одну ноду (leader)
+- Требует порт **7946/tcp+udp** между нодами (memberlist)
+
+**Выбор лидера (stateless hash):**
+Каждый speaker вычисляет `hash(nodeName + serviceIP)`, сортирует результаты, и первый в списке становится лидером для данного Service IP. При падении ноды memberlist определяет недоступность, и все speakers пересчитывают hash без этой ноды — новый лидер отправляет gratuitous ARP.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -87,7 +91,7 @@ traefik   LoadBalancer   192.168.20.235   ← IP из пула MetalLB
 | **Версия** | v0.15.3 |
 | **Namespace** | `metallb-system` |
 | **Режим** | L2 |
-| **IP пул** | 192.168.20.235-192.168.20.245 |
+| **IP пул** | 192.168.20.235-192.168.20.249 |
 
 ---
 
@@ -121,7 +125,7 @@ metadata:
   namespace: metallb-system
 spec:
   addresses:
-  - 192.168.20.235-192.168.20.245
+  - 192.168.20.235-192.168.20.249
 ---
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
@@ -161,7 +165,7 @@ metadata:
   namespace: metallb-system
 spec:
   addresses:
-  - 192.168.20.235-192.168.20.245   # Диапазон
+  - 192.168.20.235-192.168.20.249   # Диапазон
   # или
   - 192.168.20.100/32               # Один IP
   # или
@@ -215,7 +219,7 @@ kind: Service
 metadata:
   name: my-service
   annotations:
-    metallb.universe.tf/address-pool: production
+    metallb.io/address-pool: production  # Deprecated: metallb.universe.tf/address-pool
 spec:
   type: LoadBalancer
 ```
@@ -308,9 +312,11 @@ apiVersion: v1
 kind: Service
 metadata:
   name: my-service
+  annotations:
+    metallb.io/loadBalancerIPs: 192.168.20.235  # Запросить конкретный IP
 spec:
   type: LoadBalancer
-  loadBalancerIP: 192.168.20.235  # Запросить конкретный IP
+  # Deprecated: spec.loadBalancerIP — используйте аннотацию выше
 ```
 
 ---
@@ -342,7 +348,7 @@ data:
     - name: default
       protocol: layer2
       addresses:
-      - 192.168.20.235-192.168.20.245
+      - 192.168.20.235-192.168.20.249
 ```
 
 **Новый формат (v0.13+):**
@@ -354,7 +360,7 @@ metadata:
   namespace: metallb-system
 spec:
   addresses:
-  - 192.168.20.235-192.168.20.245
+  - 192.168.20.235-192.168.20.249
 ---
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement

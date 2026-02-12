@@ -45,7 +45,7 @@ updated: 2026-01-22
 │   │  StorageClass    │  Как создавать PV                        │
 │   │                  │                                          │
 │   │  provisioner:    │  "Использовать Longhorn"                 │
-│   │  driver.longhorn │                                          │
+│   │  driver.longhorn.io │                                          │
 │   └────────┬─────────┘                                          │
 │            │                                                     │
 │            ▼                                                     │
@@ -61,9 +61,12 @@ updated: 2026-01-22
 
 | Mode | Сокращение | Описание |
 |------|------------|----------|
-| ReadWriteOnce | RWO | Один под может читать/писать |
-| ReadOnlyMany | ROX | Много подов могут читать |
-| ReadWriteMany | RWX | Много подов могут читать/писать |
+| ReadWriteOnce | RWO | Одна **нода** может монтировать для чтения/записи |
+| ReadOnlyMany | ROX | Много нод могут монтировать только для чтения |
+| ReadWriteMany | RWX | Много нод могут монтировать для чтения/записи |
+| ReadWriteOncePod | RWOP | Один **под** может читать/писать (K8s 1.22+) |
+
+> **Важно:** RWO ограничивает доступ **одной нодой**, а не одним подом. Несколько подов на одной ноде могут одновременно использовать RWO volume. Для настоящей single-pod изоляции используйте RWOP.
 
 **Longhorn** поддерживает RWO (основной) и RWX (через NFS).
 
@@ -86,17 +89,24 @@ updated: 2026-01-22
 │                      Longhorn Architecture                       │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│    Node 1                Node 2                Node 3           │
-│   ┌───────┐            ┌───────┐            ┌───────┐          │
-│   │Volume │◄──────────►│Replica│◄──────────►│Replica│          │
-│   │(Head) │  sync      │       │  sync      │       │          │
-│   └───┬───┘            └───────┘            └───────┘          │
-│       │                                                         │
-│       │ iSCSI                                                   │
-│       ▼                                                         │
-│   ┌───────┐                                                     │
-│   │  Pod  │  Использует volume                                  │
-│   └───────┘                                                     │
+│    Node 1 (где запущен Pod)       Node 2           Node 3       │
+│   ┌─────────────────────────┐   ┌───────┐        ┌───────┐     │
+│   │  ┌───────┐   ┌───────┐ │   │Replica│        │Replica│     │
+│   │  │  Pod  │   │Engine │ │   │  (2)  │        │  (3)  │     │
+│   │  │       │◄─►│(Head) │─┼──►│       │        │       │     │
+│   │  └───────┘   └───┬───┘ │   └───────┘        └───────┘     │
+│   │    iSCSI         │     │       ▲                  ▲        │
+│   │   (локально)     │     │       │    TCP sync      │        │
+│   │              ┌───▼───┐ │       │   (Longhorn)     │        │
+│   │              │Replica│─┼───────┴──────────────────┘        │
+│   │              │  (1)  │ │                                    │
+│   │              └───────┘ │                                    │
+│   └─────────────────────────┘                                   │
+│                                                                  │
+│   Ключевые моменты:                                             │
+│   • Engine ВСЕГДА на той же ноде, что и Pod                     │
+│   • iSCSI — локальное соединение (Engine → Pod на одной ноде)   │
+│   • Репликация между нодами — TCP (не iSCSI)                    │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -430,10 +440,79 @@ spec:
 
 ### Наш кластер
 
-| Нода | Диски |
-|------|-------|
-| polynode-1/2/3 | `/var/lib/longhorn` |
-| [[polydev-desktop]] | `/var/lib/longhorn`, `/mnt/longhorn` |
+| Нода | Диски | Tags |
+|------|-------|------|
+| polynode-1/2/3 | `/var/lib/longhorn` | — |
+| [[polydev-desktop]] | `/var/lib/longhorn`, `/mnt/longhorn` | `large-storage` на `/mnt/longhorn` |
+
+---
+
+## Disk Tags и Node/Disk Selectors
+
+### Теория
+
+Longhorn позволяет привязывать реплики volumes к конкретным нодам и дискам через **tags** и **selectors**:
+
+- **Disk Tags** — метки на дисках (например, `large-storage`, `ssd`, `hdd`)
+- **diskSelector** — volume будет размещать реплики только на дисках с указанными тегами
+- **nodeSelector** — volume будет размещать реплики только на указанных нодах
+
+Это полезно когда:
+- Нужно разместить большой volume на конкретном диске с достаточным местом
+- Нужно разделить SSD и HDD storage
+- Нужно изолировать workloads на определённых нодах
+
+### Настройка disk tag
+
+**Через UI:** Longhorn UI → Node → выбрать ноду → Edit Node and Disks → выбрать диск → Tags → добавить тег → Save
+
+**Через kubectl:**
+
+```bash
+kubectl -n longhorn-system edit nodes.longhorn.io <node-name>
+```
+
+Добавить `tags` в нужный диск:
+
+```yaml
+spec:
+  disks:
+    mnt-disk:
+      allowScheduling: true
+      path: /mnt/longhorn
+      storageReserved: 0
+      tags:
+        - large-storage
+```
+
+### Привязка volume к ноде/диску
+
+```bash
+# Привязать volume к ноде polydev-desktop и диску с тегом large-storage
+kubectl -n longhorn-system patch volumes.longhorn.io <volume-name> \
+  --type=merge \
+  -p '{"spec":{"nodeSelector":["polydev-desktop"],"diskSelector":["large-storage"]}}'
+```
+
+**Параметры:**
+
+| Параметр | Тип | Описание |
+|----------|-----|----------|
+| `nodeSelector` | `[]string` | Список нод, на которых могут быть реплики |
+| `diskSelector` | `[]string` | Список disk tags, реплики только на дисках с этими тегами |
+
+> **Важно:** Если задан `diskSelector`, но на ноде нет диска с нужным тегом — реплика на эту ноду не попадёт, даже если нода указана в `nodeSelector`.
+
+### Наш кейс: MinIO на polydev-desktop
+
+MinIO PVC (500Gi) привязан к polydev-desktop через selectors:
+
+```
+nodeSelector: ["polydev-desktop"]
+diskSelector: ["large-storage"]
+```
+
+Это гарантирует, что данные MinIO хранятся на большом диске `/mnt/longhorn` (2TB), а не на маленьких дисках polynode-1/2/3 (256Gi).
 
 ---
 
