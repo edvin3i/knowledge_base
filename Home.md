@@ -15,7 +15,7 @@ updated: 2026-02-14
 - [[K3s]] — Kubernetes кластер
 - [[OpenWrt]] — прошивка сетевых устройств
 
-## VPS Сервисы
+## VPS Hetzner
 
 - [[Outline]] — база знаний (kb.aura.ibondar.pro)
 
