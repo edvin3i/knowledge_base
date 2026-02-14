@@ -3,7 +3,7 @@ tags:
   - index
   - moc
 created: 2025-01-15
-updated: 2026-01-20
+updated: 2026-02-14
 ---
 # eVault
 
@@ -14,6 +14,10 @@ updated: 2026-01-20
 - [[Homelab]] — обзор инфраструктуры
 - [[K3s]] — Kubernetes кластер
 - [[OpenWrt]] — прошивка сетевых устройств
+
+## VPS Сервисы
+
+- [[Outline]] — база знаний (kb.aura.ibondar.pro)
 
 ## Оборудование
 

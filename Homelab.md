@@ -4,7 +4,7 @@ tags:
   - infrastructure
   - moc
 created: 2025-01-15
-updated: 2026-01-20
+updated: 2026-02-14
 ---
 
 # Homelab
@@ -81,6 +81,8 @@ Internet
 
 ## Документация
 
+### K3s Кластер (Homelab)
+
 - [[K3s]] — кластер
 - [[MetalLB]] — LoadBalancer для bare-metal
 - [[Longhorn]] — distributed block storage
@@ -89,6 +91,10 @@ Internet
 - [[ClearML]] — MLOps платформа
 - [[OpenWrt]] — прошивка свитча
 - [[Networking]] — сетевые заметки
+
+### VPS Сервисы
+
+- [[Outline]] — база знаний (kb.aura.ibondar.pro)
 
 ## См. также
 
