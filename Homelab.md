@@ -92,7 +92,7 @@ Internet
 - [[OpenWrt]] — прошивка свитча
 - [[Networking]] — сетевые заметки
 
-### VPS Сервисы
+### VPS Hetzner
 
 - [[Outline]] — база знаний (kb.aura.ibondar.pro)
 
