@@ -140,33 +140,57 @@ statement_cache_size = 0
 | `opentelemetry-*` | Distributed tracing |
 | `structlog` | Structured logging |
 
+### DeepStream 7.1 Version Lock (ADR-003)
+
+**Решение**: Зафиксировать DS 7.1 на обеих платформах (edge + server).
+
+**Причины:**
+- DS 8.0 **не поддерживает Jetson Orin NX** (только Jetson Thor)
+- Split (server 8.0 + edge 7.1) создает два окружения и двойное CI
+- MV3DT из DS 8.0 не применим к нашему rig (baseline ~20-30 см, ΔZ ≈ 2.8м на 50м)
+- Ubuntu 22.04 → 24.04 — нетривиальная миграция стека
+- DS 7.1 активно поддерживается, EOL не анонсирован
+
+**DS 8.0 фичи не доступные нам**: MaskTracker (SAM2), MV3DT, Pose estimation, TRT 10.9
+**Пересмотр**: Q3 2026 — после выхода JetPack 7.2
+
+Подробнее: [[PV-DeepStream]]
+
+### Калибровка камер: 2D + Field Homography (ADR-024)
+
+Два уровня калибровки:
+1. **Stitching LUT** (2D→2D) — склейка L/R в панораму (CUDA kernel, 50 FPS)
+2. **Field Homography** (pixels→meters) — проекция на плоскость поля (105m × 68m)
+
+**Не используем**: Full 3D calibration (intrinsics + extrinsics) — baseline слишком мал для stereo.
+
 ### Edge Pipeline (Jetson)
 
 | Пакет / SDK | Назначение |
 |-------------|-----------|
-| `deepstream-7.1` | Video processing pipeline |
-| `tensorrt` | Model inference engine |
+| `deepstream-7.1` | Video processing pipeline (version locked) |
+| `tensorrt` 10.3 | Model inference engine |
 | `pybind11` | C++/Python bindings для `sports-analytics-core` |
 | `numpy` | Массивы данных |
 | `gi` (PyGObject) | GStreamer bindings |
 
 ### Инфраструктура
 
-| Компонент | Назначение |
-|-----------|-----------|
-| `apache-apisix` | API Gateway |
-| `etcd` | Config store для APISIX (prod) |
-| `postgresql` 16 | Основная СУБД |
-| `pgbouncer` | Connection pooling |
-| `clickhouse-server` | Аналитическая СУБД |
-| `clickhouse-keeper` | Consensus для ClickHouse |
-| `redis` 7 | Кеш + Celery broker |
-| `redpanda` | Event streaming |
-| `minio` | Object storage |
-| `prometheus` | Сбор метрик |
-| `grafana` | Дашборды |
-| `loki` | Агрегация логов |
-| `jaeger` / `tempo` | Трейсинг |
+| Компонент           | Назначение                     |
+| ------------------- | ------------------------------ |
+| `apache-apisix`     | API Gateway                    |
+| `etcd`              | Config store для APISIX (prod) |
+| `postgresql` 17     | Основная СУБД                  |
+| `pgbouncer`         | Connection pooling             |
+| `clickhouse-server` | Аналитическая СУБД             |
+| `clickhouse-keeper` | Consensus для ClickHouse       |
+| `redis` 8           | Кеш + Celery broker            |
+| `redpanda`          | Event streaming                |
+| `minio`             | Object storage                 |
+| `prometheus`        | Сбор метрик                    |
+| `grafana`           | Дашборды                       |
+| `loki`              | Агрегация логов                |
+| `jaeger` / `tempo`  | Трейсинг                       |
 
 ### Разработка и CI
 

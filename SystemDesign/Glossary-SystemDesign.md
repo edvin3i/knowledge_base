@@ -270,12 +270,19 @@ created: 2026-02-17
 | **Match Manifest** | Манифест матча | Metadata file describing uploaded recordings. / Файл метаданных, описывающий загруженные записи. |
 | **Nonce** | Одноразовое число | One-time random value used to prevent replay attacks. Stored in Redis with 5-min TTL, consumed atomically via GETDEL. / Одноразовое случайное значение для предотвращения повторных атак. Хранится в Redis с TTL 5 мин, потребляется атомарно через GETDEL. |
 | **Ed25519** | Ed25519 | Edwards-curve digital signature algorithm used for device authentication in Polyvision. / Алгоритм цифровой подписи на эллиптических кривых Эдвардса для аутентификации устройств. |
+| **Homography** | Гомография | 3×3 matrix mapping points from one 2D plane to another. Used for stitching (camera-to-camera) and field mapping (pixels-to-meters). / Матрица 3×3, отображающая точки одной 2D-плоскости на другую. |
+| **Intrinsic Calibration** | Внутренняя калибровка | Camera-specific parameters: focal length, principal point, lens distortion. / Параметры камеры: фокусное расстояние, главная точка, дисторсия линзы. |
+| **Extrinsic Calibration** | Внешняя калибровка | Camera position and orientation in world space (R + t). / Положение и ориентация камеры в мировых координатах. |
+| **Field Homography** | Гомография поля | Mapping from panorama pixels to real-world field coordinates (meters). Assumes Z≈0. / Проекция пикселей панорамы в координаты поля (метры). Допущение: Z≈0. |
+| **Triangulation** | Триангуляция | Computing 3D point from 2D observations in multiple cameras. Requires sufficient baseline. / Вычисление 3D-точки по 2D-наблюдениям. Требует достаточного baseline. |
+| **Baseline (stereo)** | Базовая линия | Distance between two camera centers. Larger = better depth accuracy. / Расстояние между центрами камер. Больше = точнее глубина. |
+| **MV3DT** | MV3DT | Multi-View 3D Tracking — DS 8.0 feature for 3D tracking from multiple cameras. / Мультиракурсное 3D-отслеживание из нескольких камер (DS 8.0). |
 
 ---
 
-*Total terms: 125+ | Всего терминов: 125+*
+*Total terms: 133+ | Всего терминов: 133+*
 
-*Last updated: 2026-02-17*
+*Last updated: 2026-02-18*
 
 ---
 
